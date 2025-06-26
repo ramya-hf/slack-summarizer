@@ -35,6 +35,10 @@ class ChannelSummary(models.Model):
     messages_count = models.IntegerField()
     timeframe = models.CharField(max_length=100, default="Last 24 hours")
     timeframe_hours = models.IntegerField(default=24)  # Store actual hours for queries
+    summary_type = models.CharField(max_length=50, default="regular", choices=[
+        ('regular', 'Regular Time-based Summary'),
+        ('unread', 'Unread Messages Summary'),
+    ])  # Track type of summary
     requested_by_user = models.CharField(max_length=100)
     created_at = models.DateTimeField(auto_now_add=True)
     

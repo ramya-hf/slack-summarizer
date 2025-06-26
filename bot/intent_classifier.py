@@ -312,118 +312,74 @@ class IntentClassifier:
 
 class ChatbotResponder:
     """
-    Generates appropriate responses for different types of interactions
+    Generate contextual responses for different types of interactions
     """
-    
-    def __init__(self):
-        """Initialize the responder"""
-        if settings.GEMINI_API_KEY:
-            genai.configure(api_key=settings.GEMINI_API_KEY)
-            self.model = genai.GenerativeModel('gemini-1.5-flash')
-        else:
-            self.model = None
     
     def generate_help_response(self) -> str:
         """Generate help response"""
-        return """👋 Hi! I'm your Slack Channel Summarizer Bot. Here's what I can do:
+        return """Here's what I can help you with:
 
-**📊 Channel Summaries:**
-• "What's happening in #general?" - Get summary of a specific channel
-• "Catch up on #social for 2 days" - Get summary with custom timeframe
-• "Summary" or "What did I miss?" - Summarize current channel
+🔹 **Channel Summaries**: I can summarize channel conversations
+   • `/summary` - Summarize current channel (last 24 hours)
+   • `/summary [channel-name]` - Summarize specific channel
+   • `/summary unread` - Summarize unread messages in current channel
+   • `/summary unread [channel-name]` - Summarize unread messages in specific channel
 
-**⏰ Timeframes I understand:**
-• "last 2 days", "yesterday", "last week"
-• "3 hours", "48 hours"
-• Default: Last 24 hours
+🔹 **Natural Language**: Just mention me or DM me!
+   • "Can you summarize #general from the last 2 hours?"
+   • "What happened in #engineering today?"
+   • "Show me unread messages summary"
 
-**💬 Commands:**
-• `/summary` - Summarize current channel
-• `/summary channel-name` - Summarize specific channel
+🔹 **Follow-up Questions**: Ask me anything about the summaries I provide
 
-**🤖 Just ask me naturally:**
-• "What's going on in marketing?"
-• "Catch me up on dev-team"
-• "Any updates from design?"
-
-Ask me anything! I'm here to help you stay caught up. 😊"""
+Need more help? Just ask me anything! 😊"""
     
-    def generate_greeting_response(self, user_message: str) -> str:
+    def generate_greeting_response(self, message: str) -> str:
         """Generate greeting response"""
-        greetings = {
-            'thanks': "You're welcome! Happy to help! 😊",
-            'thank you': "You're very welcome! Let me know if you need anything else! 🙌",
-            'hi': "Hello! 👋 How can I help you today?",
-            'hello': "Hi there! 😊 What can I do for you?",
-            'hey': "Hey! 👋 Need help catching up on any channels?",
-            'good morning': "Good morning! ☀️ Ready to catch up on what you missed?",
-            'good afternoon': "Good afternoon! 🌤️ How can I help you stay updated?",
-            'good evening': "Good evening! 🌙 Need a summary of today's discussions?",
-        }
+        greetings = [
+            "Hello! 👋 I'm your Slack summary bot. I can help you catch up on channel conversations!",
+            "Hi there! 😊 Ready to help you summarize channel activity. What would you like to know?",
+            "Hey! 🙂 I'm here to help you stay on top of your Slack conversations. Try asking for a summary!"
+        ]
         
-        message_lower = user_message.lower()
-        for key, response in greetings.items():
-            if key in message_lower:
-                return response
-        
-        return "Hello! 👋 I'm here to help you stay caught up on your Slack channels. Just ask me what's happening in any channel!"
+        import random
+        return random.choice(greetings)
     
     def generate_status_response(self) -> str:
         """Generate status response"""
-        return f"""🤖 **Bot Status: Online & Ready!**
-
-✅ Slack connection: Active
-✅ AI services: Available
-✅ Summary generation: Working
-⏰ Current time: {datetime.now().strftime('%Y-%m-%d %H:%M')}
-
-I'm ready to help you catch up on any channel! Just ask me naturally or use `/summary` commands."""
+        return "🟢 I'm online and ready to help! I can summarize channels, answer questions about summaries, and help you catch up on conversations. What can I do for you?"
     
     def generate_general_chat_response(self, message: str) -> str:
-        """Generate response for general chat using AI"""
-        if not self.model:
-            return """I'm a channel summarizer bot! 🤖 
-
-I can help you catch up on what's happening in your Slack channels. Try asking:
-• "What's happening in #general?"
-• "Catch me up on #social"
-• "Any updates from #dev-team?"
-
-Or use `/summary` commands for quick summaries!"""
+        """Generate general chat response"""
+        responses = [
+            "I'm a summary bot, so I'm best at helping with channel summaries and conversation analysis. Try asking me to summarize a channel!",
+            "That's interesting! I specialize in helping you catch up on Slack conversations. Would you like me to summarize any channels for you?",
+            "I'm here to help with channel summaries and keeping you updated on conversations. What would you like to know about?",
+            "Thanks for chatting! I'm most useful for summarizing channel activity. Try '/summary' or just ask me to summarize a channel!"
+        ]
         
-        try:
-            prompt = f"""
-            You are a helpful Slack bot assistant. The user said: "{message}"
-            
-            Respond in a friendly, helpful way that:
-            1. Acknowledges their message
-            2. Gently guides them toward your main function (channel summarization)
-            3. Gives examples of how to ask for summaries
-            4. Keeps it conversational and brief
-            5. Uses appropriate emojis
-            
-            Your main capabilities are:
-            - Summarizing Slack channels
-            - Understanding natural language requests like "what's happening in #general?"
-            - Providing summaries for different timeframes
-            
-            Keep response under 100 words and be encouraging about using your features.
-            """
-            
-            response = self.model.generate_content(prompt)
-            
-            if response.text:
-                return response.text.strip()
-                
-        except Exception as e:
-            logger.error(f"Error generating chat response: {e}")
+        import random
+        return random.choice(responses)
+    
+    def generate_followup_response(self, question: str, summary_text: str, channel_name: str) -> str:
+        """Generate response to follow-up questions about summaries"""
+        question_lower = question.lower()
         
-        # Fallback response
-        return """I understand! 😊 I'm here to help you stay updated on your Slack channels.
-
-Try asking me things like:
-• "What's happening in #marketing?"
-• "Catch me up on #dev-team for 2 days"
-• "Any updates from #social?"
-
-I can summarize any channel you have access to! What would you like to know?"""
+        if any(word in question_lower for word in ['who', 'participants', 'people', 'users']):
+            return f"Based on the summary of #{channel_name}, I can see various participants were involved in the conversations. For specific user details, you might want to check the channel directly or ask for a more detailed breakdown."
+        
+        elif any(word in question_lower for word in ['when', 'time', 'timestamp']):
+            return f"The summary covers recent activity in #{channel_name}. For specific timestamps, you'd need to check the channel directly as summaries focus on content rather than exact timing."
+        
+        elif any(word in question_lower for word in ['what', 'details', 'more', 'elaborate', 'explain']):
+            return f"The summary I provided covers the main topics and activities in #{channel_name}. For more specific details about any particular topic mentioned, I'd recommend checking the channel directly or asking about a specific aspect you're interested in."
+        
+        elif any(word in question_lower for word in ['how', 'why']):
+            return f"Based on the summary of #{channel_name}, I've captured the key discussions and activities. For deeper context about how or why specific things happened, you might want to review the actual channel messages."
+        
+        else:
+            return f"I'd be happy to help clarify anything about the #{channel_name} summary! Could you be more specific about what aspect you'd like to know more about?"
+    
+    def generate_chat_followup_response(self, question: str, last_message: str, last_response: str) -> str:
+        """Generate response to follow-up questions in general chat"""
+        return "I remember our conversation! However, I'm most helpful with channel summaries and conversation analysis. Is there a specific channel you'd like me to summarize or analyze?"
