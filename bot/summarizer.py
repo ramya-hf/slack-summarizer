@@ -497,3 +497,87 @@ def extract_unread_command_details(command_text: str) -> Tuple[Optional[str], bo
             return None, is_unread
     
     return None, False
+
+
+def extract_thread_command_details(command_text: str) -> Tuple[str, Optional[str], Optional[str]]:
+    """
+    Extract thread command details from command text like:
+    "/summary thread latest channel-name" or "/summary thread https://workspace.slack.com/archives/C123/p123456"
+    
+    Args:
+        command_text: The full command text
+        
+    Returns:
+        Tuple of (thread_type, channel_name_or_link, message_ts)
+        - thread_type: 'latest' or 'specific'
+        - channel_name_or_link: channel name for latest, message link for specific
+        - message_ts: None for latest, parsed timestamp for specific
+    """
+    parts = command_text.strip().split()
+    
+    # Check if it's a thread command
+    if len(parts) >= 3 and parts[1].lower() == 'thread':
+        thread_operation = parts[2].lower()
+        
+        if thread_operation == 'latest':
+            # /summary thread latest [channel-name]
+            if len(parts) >= 4:
+                channel_name = parts[3].strip()
+                # Remove # if present
+                if channel_name.startswith('#'):
+                    channel_name = channel_name[1:]
+                return 'latest', channel_name, None
+            else:
+                # No channel specified, use current channel
+                return 'latest', None, None
+        else:
+            # Assume it's a message link: /summary thread https://workspace.slack.com/archives/C123/p123456
+            message_link = parts[2]
+            channel_id, message_ts = parse_message_link(message_link)
+            if channel_id and message_ts:
+                return 'specific', message_link, message_ts
+    
+    return 'invalid', None, None
+
+
+def parse_message_link(message_link: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Parse a Slack message link to extract channel ID and message timestamp
+    
+    Args:
+        message_link: Slack message link in format:
+                     https://workspace.slack.com/archives/CHANNEL_ID/pTIMESTAMP
+                     
+    Returns:
+        Tuple of (channel_id, message_timestamp) or (None, None) if invalid
+    """
+    import re
+    
+    # Pattern to match Slack message links
+    pattern = r'https://[^/]+\.slack\.com/archives/([A-Z0-9]+)/p(\d+)'
+    match = re.match(pattern, message_link)
+    
+    if match:
+        channel_id = match.group(1)
+        timestamp_raw = match.group(2)
+        
+        # Convert timestamp from format like "1234567890123456" to "1234567890.123456"
+        if len(timestamp_raw) >= 10:
+            timestamp = f"{timestamp_raw[:10]}.{timestamp_raw[10:]}"
+            return channel_id, timestamp
+    
+    return None, None
+
+
+def is_thread_command(command_text: str) -> bool:
+    """
+    Check if the command is a thread-related command
+    
+    Args:
+        command_text: The full command text
+        
+    Returns:
+        True if it's a thread command
+    """
+    parts = command_text.strip().split()
+    return len(parts) >= 3 and parts[1].lower() == 'thread'

@@ -19,7 +19,11 @@ from .models import (
     SlackWorkspace, SlackChannel, ChannelSummary, 
     ConversationContext, BotCommand, ChatbotInteraction
 )
-from .summarizer import ChannelSummarizer, filter_messages_by_timeframe, extract_channel_name_from_command, extract_unread_command_details
+from .summarizer import (
+    ChannelSummarizer, filter_messages_by_timeframe, extract_channel_name_from_command, 
+    extract_unread_command_details, extract_thread_command_details, parse_message_link, 
+    is_thread_command
+)
 from .intent_classifier import IntentClassifier, ChatbotResponder
 
 logger = logging.getLogger(__name__)
@@ -94,7 +98,7 @@ class SlackBotHandler:
     
     def _handle_summary_command(self, payload: Dict, bot_command: BotCommand) -> Dict:
         """
-        Handle the /summary command and its variations including unread
+        Handle the /summary command and its variations including unread and thread
         
         Args:
             payload: Slack command payload
@@ -113,11 +117,33 @@ class SlackBotHandler:
         # Process the summary request asynchronously
         try:
             if text:
-                # Check if it's an unread command
-                target_channel, is_unread = extract_unread_command_details(f"/summary {text}")
+                # Check if it's a thread command first
+                if is_thread_command(f"/summary {text}"):
+                    thread_type, target, message_ts = extract_thread_command_details(f"/summary {text}")
+                    
+                    if thread_type == 'latest':
+                        if target:
+                            self._process_latest_thread_summary(target, channel_id, user_id, bot_command)
+                        else:
+                            # Latest thread in current channel
+                            self._process_current_channel_latest_thread_summary(channel_id, user_id, bot_command)
+                    elif thread_type == 'specific':
+                        self._process_specific_thread_summary(target, message_ts, channel_id, user_id, bot_command)
+                    else:
+                        # Invalid thread command
+                        bot_command.status = 'failed'
+                        bot_command.error_message = 'Invalid thread command format'
+                        bot_command.save()
+                        
+                        self._send_error_message(
+                            channel_id,
+                            "❌ Invalid thread command format. Examples:\n• `/summary thread latest general` - Latest thread in #general\n• `/summary thread latest` - Latest thread in current channel\n• `/summary thread https://workspace.slack.com/archives/C123/p123456` - Specific thread"
+                        )
                 
-                if is_unread:
-                    # Handle unread summary
+                # Check if it's an unread command
+                elif extract_unread_command_details(f"/summary {text}")[1]:
+                    target_channel, is_unread = extract_unread_command_details(f"/summary {text}")
+                    
                     if target_channel:
                         self._process_unread_channel_summary(target_channel, channel_id, user_id, bot_command)
                     else:
@@ -131,12 +157,12 @@ class SlackBotHandler:
                     else:
                         # Invalid channel format
                         bot_command.status = 'failed'
-                        bot_command.error_message = 'Invalid channel format'
+                        bot_command.error_message = 'Invalid command format'
                         bot_command.save()
                         
                         self._send_error_message(
                             channel_id, 
-                            "❌ Please specify a valid channel name. Examples:\n• `/summary general` - Regular summary\n• `/summary unread general` - Unread messages summary\n• `/summary unread` - Unread messages in current channel"
+                            "❌ Please specify a valid command. Examples:\n• `/summary general` - Regular summary\n• `/summary unread general` - Unread messages summary\n• `/summary thread latest general` - Latest thread summary\n• `/summary thread <message-link>` - Specific thread summary"
                         )
             else:
                 # Summarize current channel (regular)
@@ -697,11 +723,443 @@ class SlackBotHandler:
         except SlackApiError as e:
             logger.error(f"Failed to send unread summary message: {e}")
 
+    def _process_latest_thread_summary(self, channel_name: str, response_channel_id: str, user_id: str, bot_command: BotCommand):
+        """
+        Process summary for the latest thread in a specific channel
+        
+        Args:
+            channel_name: Name of the channel to find latest thread in
+            response_channel_id: Channel to send the response to
+            user_id: User who requested the summary
+            bot_command: Database record for this command
+        """
+        start_time = time.time()
+        
+        try:
+            # Find the channel
+            channel_info = self._get_channel_info(channel_name)
+            if not channel_info:
+                bot_command.status = 'failed'
+                bot_command.error_message = f'Channel #{channel_name} not found'
+                bot_command.save()
+                
+                self._send_error_message(
+                    response_channel_id,
+                    f"❌ Channel `#{channel_name}` not found or I don't have access to it."
+                )
+                return
+            
+            channel_id = channel_info['id']
+            
+            # Find the latest thread in the channel
+            latest_thread_ts = self._get_latest_thread_timestamp(channel_id)
+            if not latest_thread_ts:
+                bot_command.status = 'failed'
+                bot_command.error_message = f'No threads found in #{channel_name}'
+                bot_command.save()
+                
+                self._send_error_message(
+                    response_channel_id,
+                    f"❌ No threads found in `#{channel_name}`."
+                )
+                return
+            
+            # Get thread messages
+            thread_messages = self._get_thread_messages(channel_id, latest_thread_ts)
+            
+            # Update bot command status
+            bot_command.status = 'processing'
+            bot_command.save()
+            
+            # Generate thread summary
+            summary = self.summarizer.generate_summary(thread_messages, f"{channel_name} (Latest Thread)")
+            
+            # Save summary to database
+            workspace, _ = SlackWorkspace.objects.get_or_create(
+                workspace_id="default",
+                defaults={'workspace_name': 'Default Workspace'}
+            )
+            
+            slack_channel, _ = SlackChannel.objects.get_or_create(
+                workspace=workspace,
+                channel_id=channel_id,
+                defaults={
+                    'channel_name': channel_name,
+                    'is_private': channel_info.get('is_private', False)
+                }
+            )
+            
+            channel_summary = ChannelSummary.objects.create(
+                channel=slack_channel,
+                summary_text=summary,
+                messages_count=len(thread_messages),
+                timeframe=f"Latest thread in #{channel_name}",
+                timeframe_hours=0,  # Special indicator for thread
+                requested_by_user=user_id
+            )
+            
+            # Store conversation context for follow-ups
+            ConversationContext.objects.update_or_create(
+                user_id=user_id,
+                channel_id=response_channel_id,
+                defaults={
+                    'context_type': 'summary',
+                    'context_data': json.dumps({
+                        'summary_id': channel_summary.id,
+                        'summarized_channel': channel_name,
+                        'summary_text': summary,
+                        'summary_type': 'thread_latest',
+                        'thread_ts': latest_thread_ts
+                    }),
+                    'last_summary': channel_summary
+                }
+            )
+            
+            # Send the summary
+            self._send_thread_summary_message(response_channel_id, summary, user_id, f"#{channel_name}", "latest thread")
+            
+            # Update command status
+            execution_time = time.time() - start_time
+            bot_command.status = 'completed'
+            bot_command.execution_time = execution_time
+            bot_command.save()
+            
+        except Exception as e:
+            logger.error(f"Error processing latest thread summary: {str(e)}")
+            bot_command.status = 'failed'
+            bot_command.error_message = str(e)
+            bot_command.save()
+            
+            self._send_error_message(
+                response_channel_id,
+                f"❌ Failed to generate latest thread summary for `#{channel_name}`. Error: {str(e)}"
+            )
+    
+    def _process_current_channel_latest_thread_summary(self, channel_id: str, user_id: str, bot_command: BotCommand):
+        """
+        Process summary for the latest thread in the current channel
+        
+        Args:
+            channel_id: ID of the current channel
+            user_id: User who requested the summary
+            bot_command: Database record for this command
+        """
+        start_time = time.time()
+        
+        try:
+            # Get channel info
+            channel_info = self._get_channel_info_by_id(channel_id)
+            channel_name = channel_info.get('name', 'current-channel') if channel_info else 'current-channel'
+            
+            # Find the latest thread in the current channel
+            latest_thread_ts = self._get_latest_thread_timestamp(channel_id)
+            if not latest_thread_ts:
+                bot_command.status = 'failed'
+                bot_command.error_message = f'No threads found in current channel'
+                bot_command.save()
+                
+                self._send_error_message(
+                    channel_id,
+                    "❌ No threads found in this channel."
+                )
+                return
+            
+            # Get thread messages
+            thread_messages = self._get_thread_messages(channel_id, latest_thread_ts)
+            
+            # Update bot command status
+            bot_command.status = 'processing'
+            bot_command.save()
+            
+            # Generate thread summary
+            summary = self.summarizer.generate_summary(thread_messages, f"{channel_name} (Latest Thread)")
+            
+            # Save summary to database
+            workspace, _ = SlackWorkspace.objects.get_or_create(
+                workspace_id="default",
+                defaults={'workspace_name': 'Default Workspace'}
+            )
+            
+            slack_channel, _ = SlackChannel.objects.get_or_create(
+                workspace=workspace,
+                channel_id=channel_id,
+                defaults={
+                    'channel_name': channel_name,
+                    'is_private': channel_info.get('is_private', False) if channel_info else False
+                }
+            )
+            
+            channel_summary = ChannelSummary.objects.create(
+                channel=slack_channel,
+                summary_text=summary,
+                messages_count=len(thread_messages),
+                timeframe=f"Latest thread in #{channel_name}",
+                timeframe_hours=0,  # Special indicator for thread
+                requested_by_user=user_id
+            )
+            
+            # Store conversation context for follow-ups
+            ConversationContext.objects.update_or_create(
+                user_id=user_id,
+                channel_id=channel_id,
+                defaults={
+                    'context_type': 'summary',
+                    'context_data': json.dumps({
+                        'summary_id': channel_summary.id,
+                        'summarized_channel': channel_name,
+                        'summary_text': summary,
+                        'summary_type': 'thread_latest',
+                        'thread_ts': latest_thread_ts
+                    }),
+                    'last_summary': channel_summary
+                }
+            )
+            
+            # Send the summary
+            self._send_thread_summary_message(channel_id, summary, user_id, f"#{channel_name}", "latest thread")
+            
+            # Update command status
+            execution_time = time.time() - start_time
+            bot_command.status = 'completed'
+            bot_command.execution_time = execution_time
+            bot_command.save()
+            
+        except Exception as e:
+            logger.error(f"Error processing current channel latest thread summary: {str(e)}")
+            bot_command.status = 'failed'
+            bot_command.error_message = str(e)
+            bot_command.save()
+            
+            self._send_error_message(
+                channel_id,
+                f"❌ Failed to generate latest thread summary. Error: {str(e)}"
+            )
+    
+    def _process_specific_thread_summary(self, message_link: str, message_ts: str, response_channel_id: str, user_id: str, bot_command: BotCommand):
+        """
+        Process summary for a specific thread identified by message link
+        
+        Args:
+            message_link: Slack message link
+            message_ts: Parsed message timestamp
+            response_channel_id: Channel to send the response to
+            user_id: User who requested the summary
+            bot_command: Database record for this command
+        """
+        start_time = time.time()
+        
+        try:
+            # Parse the message link to get channel ID
+            channel_id, _ = parse_message_link(message_link)
+            if not channel_id:
+                bot_command.status = 'failed'
+                bot_command.error_message = 'Invalid message link format'
+                bot_command.save()
+                
+                self._send_error_message(
+                    response_channel_id,
+                    "❌ Invalid message link format. Please provide a valid Slack message link."
+                )
+                return
+            
+            # Get channel info
+            channel_info = self._get_channel_info_by_id(channel_id)
+            channel_name = channel_info.get('name', 'unknown-channel') if channel_info else 'unknown-channel'
+            
+            # Check if the message has replies (is a thread)
+            if not self._message_has_replies(channel_id, message_ts):
+                bot_command.status = 'failed'
+                bot_command.error_message = 'Message has no thread replies'
+                bot_command.save()
+                
+                self._send_error_message(
+                    response_channel_id,
+                    "❌ The specified message has no thread replies to summarize."
+                )
+                return
+            
+            # Get thread messages
+            thread_messages = self._get_thread_messages(channel_id, message_ts)
+            
+            # Update bot command status
+            bot_command.status = 'processing'
+            bot_command.save()
+            
+            # Generate thread summary
+            summary = self.summarizer.generate_summary(thread_messages, f"{channel_name} (Specific Thread)")
+            
+            # Save summary to database
+            workspace, _ = SlackWorkspace.objects.get_or_create(
+                workspace_id="default",
+                defaults={'workspace_name': 'Default Workspace'}
+            )
+            
+            slack_channel, _ = SlackChannel.objects.get_or_create(
+                workspace=workspace,
+                channel_id=channel_id,
+                defaults={
+                    'channel_name': channel_name,
+                    'is_private': channel_info.get('is_private', False) if channel_info else False
+                }
+            )
+            
+            channel_summary = ChannelSummary.objects.create(
+                channel=slack_channel,
+                summary_text=summary,
+                messages_count=len(thread_messages),
+                timeframe=f"Specific thread in #{channel_name}",
+                timeframe_hours=0,  # Special indicator for thread
+                requested_by_user=user_id
+            )
+            
+            # Store conversation context for follow-ups
+            ConversationContext.objects.update_or_create(
+                user_id=user_id,
+                channel_id=response_channel_id,
+                defaults={
+                    'context_type': 'summary',
+                    'context_data': json.dumps({
+                        'summary_id': channel_summary.id,
+                        'summarized_channel': channel_name,
+                        'summary_text': summary,
+                        'summary_type': 'thread_specific',
+                        'thread_ts': message_ts,
+                        'message_link': message_link
+                    }),
+                    'last_summary': channel_summary
+                }
+            )
+            
+            # Send the summary
+            self._send_thread_summary_message(response_channel_id, summary, user_id, f"#{channel_name}", "specific thread")
+            
+            # Update command status
+            execution_time = time.time() - start_time
+            bot_command.status = 'completed'
+            bot_command.execution_time = execution_time
+            bot_command.save()
+            
+        except Exception as e:
+            logger.error(f"Error processing specific thread summary: {str(e)}")
+            bot_command.status = 'failed'
+            bot_command.error_message = str(e)
+            bot_command.save()
+            
+            self._send_error_message(
+                response_channel_id,
+                f"❌ Failed to generate thread summary. Error: {str(e)}"
+            )
+    
+    def _get_latest_thread_timestamp(self, channel_id: str) -> Optional[str]:
+        """
+        Find the most recent message that has thread replies in a channel
+        
+        Args:
+            channel_id: Slack channel ID
+            
+        Returns:
+            Timestamp of the latest thread or None if no threads found
+        """
+        try:
+            # Get recent messages from the channel
+            response = self.client.conversations_history(
+                channel=channel_id,
+                limit=100  # Check last 100 messages for threads
+            )
+            
+            messages = response.get('messages', [])
+            
+            # Find the most recent message with thread replies
+            for message in messages:
+                if (message.get('reply_count', 0) > 0 and 
+                    message.get('type') == 'message' and
+                    'subtype' not in message):
+                    return message.get('ts')
+            
+            return None
+            
+        except SlackApiError as e:
+            logger.error(f"Error finding latest thread in channel {channel_id}: {e}")
+            return None
+    
+    def _get_thread_messages(self, channel_id: str, thread_ts: str) -> List[Dict]:
+        """
+        Get all messages in a thread
+        
+        Args:
+            channel_id: Slack channel ID
+            thread_ts: Thread timestamp (parent message timestamp)
+            
+        Returns:
+            List of thread message dictionaries
+        """
+        try:
+            response = self.client.conversations_replies(
+                channel=channel_id,
+                ts=thread_ts
+            )
+            
+            messages = response.get('messages', [])
+            
+            # Filter out bot messages but keep the original message
+            filtered_messages = []
+            for message in messages:
+                if (message.get('type') == 'message' and 
+                    message.get('user') != self.bot_user_id and
+                    'bot_id' not in message):
+                    filtered_messages.append(message)
+            
+            return filtered_messages
+            
+        except SlackApiError as e:
+            logger.error(f"Error getting thread messages for {thread_ts} in channel {channel_id}: {e}")
+            return []
+    
+    def _message_has_replies(self, channel_id: str, message_ts: str) -> bool:
+        """
+        Check if a message has thread replies
+        
+        Args:
+            channel_id: Slack channel ID
+            message_ts: Message timestamp
+            
+        Returns:
+            True if message has replies
+        """
+        try:
+            response = self.client.conversations_replies(
+                channel=channel_id,
+                ts=message_ts
+            )
+            
+            messages = response.get('messages', [])
+            # If there's more than 1 message (original + replies), it has replies
+            return len(messages) > 1
+            
+        except SlackApiError as e:
+            logger.error(f"Error checking thread replies for {message_ts} in channel {channel_id}: {e}")
+            return False
+    
+    def _send_thread_summary_message(self, channel_id: str, summary: str, user_id: str, channel_context: str, thread_type: str):
+        """Send the thread summary message to the channel"""
+        try:
+            # Create a formatted message with the thread summary
+            formatted_message = f"<@{user_id}> Here's your {thread_type} summary for {channel_context}:\n\n```\n{summary}\n```\n\n💬 *Ask me any follow-up questions about this thread summary!*"
+            
+            self.client.chat_postMessage(
+                channel=channel_id,
+                text=formatted_message,
+                unfurl_links=False,
+                unfurl_media=False
+            )
+        except SlackApiError as e:
+            logger.error(f"Failed to send thread summary message: {e}")
+    
     def _handle_unknown_command(self, command: str) -> Dict:
         """Handle unknown commands"""
         return {
             "response_type": "ephemeral",
-            "text": f"❓ Unknown command `{command}`. Available commands:\n• `/summary` - Summarize current channel (last 24 hours)\n• `/summary [channel-name]` - Summarize specific channel\n• `/summary unread` - Summarize unread messages in current channel\n• `/summary unread [channel-name]` - Summarize unread messages in specific channel"
+            "text": f"❓ Unknown command `{command}`. Available commands:\n• `/summary` - Summarize current channel (last 24 hours)\n• `/summary [channel-name]` - Summarize specific channel\n• `/summary unread` - Summarize unread messages in current channel\n• `/summary unread [channel-name]` - Summarize unread messages in specific channel\n• `/summary thread latest` - Summarize latest thread in current channel\n• `/summary thread latest [channel-name]` - Summarize latest thread in specific channel\n• `/summary thread [message-link]` - Summarize specific thread"
         }
     
     def process_message_event(self, event_data: Dict) -> bool:
