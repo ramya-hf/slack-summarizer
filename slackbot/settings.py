@@ -11,6 +11,11 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -20,12 +25,18 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-tgsizyb$=(1n3zw+c45fd4q$pto)t5u$x-6*tl8sw(d4wjtg18'
+SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'django-insecure-tgsizyb$=(1n3zw+c45fd4q$pto)t5u$x-6*tl8sw(d4wjtg18')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv('DEBUG', 'True').lower() == 'true'
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['*']  # Configure appropriately for production
+
+# Slack Configuration
+SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN')
+SLACK_APP_TOKEN = os.getenv('SLACK_APP_TOKEN')
+SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 
 # Application definition
@@ -44,7 +55,7 @@ MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
+    # 'django.middleware.csrf.CsrfViewMiddleware',  # Disabled for Slack events
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
