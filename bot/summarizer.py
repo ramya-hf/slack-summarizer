@@ -87,21 +87,23 @@ class ChannelSummarizer:
         
         return text.strip()
     
-    def generate_summary(self, messages: List[Dict], channel_name: str = None) -> str:
+    def generate_summary(self, messages: List[Dict], channel_name: str = None, timeframe_hours: int = 24) -> str:
         """
         Generate a summary of channel messages using the specified prompt format
         
         Args:
             messages: List of message dictionaries from Slack API
             channel_name: Name of the channel being summarized
+            timeframe_hours: Number of hours covered in the summary
             
         Returns:
             Formatted summary string
         """
         if not messages:
-            return self._generate_empty_summary(channel_name)
+            return self._generate_empty_summary(channel_name, timeframe_hours)
         
         formatted_messages = self.format_messages_for_analysis(messages)
+        timeframe_text = self._hours_to_timeframe_text(timeframe_hours)
         
         # Use the exact prompt format specified by the user
         prompt = f"""
@@ -141,7 +143,7 @@ class ChannelSummarizer:
 
             Summary Details
             Messages analyzed: {len(messages)}
-            Timeframe: Last 24 hours
+            Timeframe: {timeframe_text}
             Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}
 
             CRITICAL FORMATTING RULES:
@@ -168,11 +170,11 @@ class ChannelSummarizer:
                 return response.text.strip()
             else:
                 logger.error("No response text from Gemini API")
-                return self._generate_error_summary(channel_name, "No response from AI service")
+                return self._generate_error_summary(channel_name, "No response from AI service", timeframe_hours)
                 
         except Exception as e:
             logger.error(f"Error generating summary with Gemini: {str(e)}")
-            return self._generate_error_summary(channel_name, str(e))
+            return self._generate_error_summary(channel_name, str(e), timeframe_hours)
     
     def generate_followup_response(self, question: str, summary_context: str, channel_name: str = None) -> str:
         """
@@ -215,8 +217,21 @@ class ChannelSummarizer:
             logger.error(f"Error generating follow-up response: {str(e)}")
             return "I encountered an error while processing your question. Please try again later."
     
-    def _generate_empty_summary(self, channel_name: str) -> str:
+    def _hours_to_timeframe_text(self, hours: int) -> str:
+        """Convert hours to human-readable timeframe text"""
+        if hours <= 24:
+            return f"Last {hours} hours" if hours != 24 else "Last 24 hours"
+        elif hours <= 168:  # 7 days
+            days = hours // 24
+            return f"Last {days} days" if days != 1 else "Last day"
+        else:
+            weeks = hours // 168
+            return f"Last {weeks} weeks" if weeks != 1 else "Last week"
+    
+    def _generate_empty_summary(self, channel_name: str, timeframe_hours: int = 24) -> str:
         """Generate a summary for when no messages are found"""
+        timeframe_text = self._hours_to_timeframe_text(timeframe_hours)
+        
         return f"""
 Summary Report – #{channel_name or 'channel'}
 
@@ -244,12 +259,14 @@ Needs Immediate Attention 🚨
 
 Summary Details
 Messages analyzed: 0
-Timeframe: Last 24 hours
+Timeframe: {timeframe_text}
 Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}
         """.strip()
     
-    def _generate_error_summary(self, channel_name: str, error: str) -> str:
+    def _generate_error_summary(self, channel_name: str, error: str, timeframe_hours: int = 24) -> str:
         """Generate an error summary when AI processing fails"""
+        timeframe_text = self._hours_to_timeframe_text(timeframe_hours)
+        
         return f"""
 Summary Report – #{channel_name or 'channel'}
 
@@ -261,7 +278,7 @@ Please try again later or contact your administrator if the problem persists.
 
 Summary Details
 Messages analyzed: Error occurred during processing
-Timeframe: Last 24 hours
+Timeframe: {timeframe_text}
 Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}
         """.strip()
 

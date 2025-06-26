@@ -17,16 +17,17 @@ from django.utils import timezone
 
 from .models import (
     SlackWorkspace, SlackChannel, ChannelSummary, 
-    ConversationContext, BotCommand
+    ConversationContext, BotCommand, ChatbotInteraction
 )
 from .summarizer import ChannelSummarizer, filter_messages_by_timeframe, extract_channel_name_from_command
+from .intent_classifier import IntentClassifier, ChatbotResponder
 
 logger = logging.getLogger(__name__)
 
 
 class SlackBotHandler:
     """
-    Main handler for Slack bot operations
+    Main handler for Slack bot operations with enhanced chatbot capabilities
     """
     
     def __init__(self):
@@ -36,6 +37,8 @@ class SlackBotHandler:
         
         self.client = WebClient(token=settings.SLACK_BOT_TOKEN)
         self.summarizer = ChannelSummarizer()
+        self.intent_classifier = IntentClassifier()
+        self.responder = ChatbotResponder()
         self.bot_user_id = None
         self._initialize_bot_info()
     
@@ -381,6 +384,398 @@ class SlackBotHandler:
             logger.error(f"Error getting channel info for {channel_id}: {e}")
             return None
     
+    def process_message_event(self, event_data: Dict) -> bool:
+        """
+        Enhanced message event processing with natural language understanding
+        
+        Args:
+            event_data: Slack event data
+            
+        Returns:
+            True if message was processed, False otherwise
+        """
+        event = event_data.get('event', {})
+        
+        # Ignore bot messages and system messages
+        if (event.get('bot_id') or 
+            event.get('user') == self.bot_user_id or
+            event.get('subtype')):
+            return False
+        
+        user_id = event.get('user')
+        channel_id = event.get('channel')
+        text = event.get('text', '').strip()
+        
+        if not all([user_id, channel_id, text]):
+            return False
+        
+        # Check if bot is mentioned or if this is a DM
+        is_mentioned = f'<@{self.bot_user_id}>' in text
+        is_dm = channel_id.startswith('D')  # Direct message channels start with 'D'
+        
+        # Remove bot mention from text for processing
+        if is_mentioned:
+            text = text.replace(f'<@{self.bot_user_id}>', '').strip()
+        
+        # Process if bot is mentioned or in DM
+        if is_mentioned or is_dm:
+            return self._process_natural_language_message(user_id, channel_id, text, event_data)
+        
+        # Check for follow-up questions (existing functionality)
+        try:
+            context = ConversationContext.objects.filter(
+                user_id=user_id,
+                channel_id=channel_id,
+                context_type__in=['summary', 'chat'],
+                updated_at__gte=timezone.now() - timedelta(hours=2)  # Context expires after 2 hours
+            ).first()
+            
+            if context and self._is_followup_question(text):
+                self._handle_followup_question(context, text, channel_id, user_id)
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error processing message event: {str(e)}")
+        
+        return False
+    
+    def _process_natural_language_message(self, user_id: str, channel_id: str, text: str, event_data: Dict) -> bool:
+        """
+        Process natural language messages using intent classification
+        
+        Args:
+            user_id: User ID
+            channel_id: Channel ID
+            text: Message text (with mentions removed)
+            event_data: Full event data
+            
+        Returns:
+            True if message was processed
+        """
+        start_time = time.time()
+        
+        try:
+            # Classify the intent
+            classification = self.intent_classifier.classify_intent(text, user_id)
+            intent = classification['intent']
+            confidence = classification['confidence']
+            parameters = classification.get('parameters', {})
+            
+            # Log the interaction
+            interaction = ChatbotInteraction.objects.create(
+                user_id=user_id,
+                channel_id=channel_id,
+                message_type='natural_language',
+                user_message=text,
+                intent_classified=intent,
+                confidence_score=confidence,
+                processing_time=time.time() - start_time
+            )
+            interaction.set_extracted_parameters(parameters)
+            
+            # Handle different intents
+            if intent == 'summary_request':
+                return self._handle_natural_summary_request(user_id, channel_id, parameters, interaction)
+            elif intent == 'help_request':
+                return self._handle_help_request(user_id, channel_id, interaction)
+            elif intent == 'greeting':
+                return self._handle_greeting(user_id, channel_id, text, interaction)
+            elif intent == 'status_check':
+                return self._handle_status_check(user_id, channel_id, interaction)
+            else:  # general_chat
+                return self._handle_general_chat(user_id, channel_id, text, interaction)
+                
+        except Exception as e:
+            logger.error(f"Error processing natural language message: {str(e)}")
+            self._send_error_message(channel_id, f"<@{user_id}> I encountered an error processing your message. Please try again.")
+            return False
+    
+    def _handle_natural_summary_request(self, user_id: str, channel_id: str, parameters: Dict, interaction: ChatbotInteraction) -> bool:
+        """Handle natural language summary requests"""
+        try:
+            target_channel = parameters.get('channel_name')
+            timeframe_hours = parameters.get('timeframe_hours', 24)
+            timeframe_text = parameters.get('timeframe_text', 'Last 24 hours')
+            
+            # Send acknowledgment
+            if target_channel:
+                ack_message = f"<@{user_id}> Getting summary for #{target_channel} ({timeframe_text}) ⏳"
+            else:
+                ack_message = f"<@{user_id}> Getting summary for this channel ({timeframe_text}) ⏳"
+            
+            self.client.chat_postMessage(
+                channel=channel_id,
+                text=ack_message,
+                unfurl_links=False,
+                unfurl_media=False
+            )
+            
+            # Process the summary
+            if target_channel:
+                self._process_natural_channel_summary(target_channel, channel_id, user_id, timeframe_hours, interaction)
+            else:
+                self._process_natural_current_channel_summary(channel_id, user_id, timeframe_hours, interaction)
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error handling natural summary request: {str(e)}")
+            interaction.bot_response = f"Error: {str(e)}"
+            interaction.save()
+            return False
+    
+    def _process_natural_channel_summary(self, channel_name: str, response_channel_id: str, user_id: str, timeframe_hours: int, interaction: ChatbotInteraction):
+        """Process natural language channel summary request"""
+        start_time = time.time()
+        
+        try:
+            # Find the channel
+            channel_info = self._get_channel_info(channel_name)
+            if not channel_info:
+                error_msg = f"❌ Channel `#{channel_name}` not found or I don't have access to it."
+                self._send_error_message(response_channel_id, f"<@{user_id}> {error_msg}")
+                interaction.bot_response = error_msg
+                interaction.save()
+                return
+            
+            channel_id = channel_info['id']
+            
+            # Get messages from the channel
+            messages = self._get_channel_messages(channel_id, hours=timeframe_hours)
+            
+            # Filter to specified timeframe
+            recent_messages = filter_messages_by_timeframe(messages, hours=timeframe_hours)
+            
+            # Generate summary
+            summary = self.summarizer.generate_summary(recent_messages, channel_name, timeframe_hours)
+            
+            # Save summary to database
+            workspace, _ = SlackWorkspace.objects.get_or_create(
+                workspace_id="default",
+                defaults={'workspace_name': 'Default Workspace'}
+            )
+            
+            slack_channel, _ = SlackChannel.objects.get_or_create(
+                workspace=workspace,
+                channel_id=channel_id,
+                defaults={
+                    'channel_name': channel_name,
+                    'is_private': channel_info.get('is_private', False)
+                }
+            )
+            
+            channel_summary = ChannelSummary.objects.create(
+                channel=slack_channel,
+                summary_text=summary,
+                messages_count=len(recent_messages),
+                timeframe_hours=timeframe_hours,
+                requested_by_user=user_id
+            )
+            
+            # Store conversation context for follow-ups
+            ConversationContext.objects.update_or_create(
+                user_id=user_id,
+                channel_id=response_channel_id,
+                defaults={
+                    'context_type': 'summary',
+                    'context_data': json.dumps({
+                        'summary_id': channel_summary.id,
+                        'summarized_channel': channel_name,
+                        'summary_text': summary,
+                        'timeframe_hours': timeframe_hours,
+                        'interaction_type': 'natural_language'
+                    }),
+                    'last_summary': channel_summary,
+                    'last_interaction_type': 'natural_language'
+                }
+            )
+            
+            # Send the summary
+            self._send_summary_message(response_channel_id, summary, user_id)
+            
+            # Update interaction
+            execution_time = time.time() - start_time
+            interaction.bot_response = "Summary generated successfully"
+            interaction.processing_time = execution_time
+            interaction.save()
+            
+        except Exception as e:
+            logger.error(f"Error processing natural channel summary: {str(e)}")
+            error_msg = f"❌ Failed to generate summary for `#{channel_name}`. Error: {str(e)}"
+            self._send_error_message(response_channel_id, f"<@{user_id}> {error_msg}")
+            interaction.bot_response = error_msg
+            interaction.save()
+    
+    def _process_natural_current_channel_summary(self, channel_id: str, user_id: str, timeframe_hours: int, interaction: ChatbotInteraction):
+        """Process natural language current channel summary request"""
+        start_time = time.time()
+        
+        try:
+            # Get channel info
+            channel_info = self._get_channel_info_by_id(channel_id)
+            channel_name = channel_info.get('name', 'current-channel') if channel_info else 'current-channel'
+            
+            # Get messages from the current channel
+            messages = self._get_channel_messages(channel_id, hours=timeframe_hours)
+            
+            # Filter to specified timeframe
+            recent_messages = filter_messages_by_timeframe(messages, hours=timeframe_hours)
+            
+            # Generate summary
+            summary = self.summarizer.generate_summary(recent_messages, channel_name, timeframe_hours)
+            
+            # Save summary to database
+            workspace, _ = SlackWorkspace.objects.get_or_create(
+                workspace_id="default",
+                defaults={'workspace_name': 'Default Workspace'}
+            )
+            
+            slack_channel, _ = SlackChannel.objects.get_or_create(
+                workspace=workspace,
+                channel_id=channel_id,
+                defaults={
+                    'channel_name': channel_name,
+                    'is_private': channel_info.get('is_private', False) if channel_info else False
+                }
+            )
+            
+            channel_summary = ChannelSummary.objects.create(
+                channel=slack_channel,
+                summary_text=summary,
+                messages_count=len(recent_messages),
+                timeframe_hours=timeframe_hours,
+                requested_by_user=user_id
+            )
+            
+            # Store conversation context for follow-ups
+            ConversationContext.objects.update_or_create(
+                user_id=user_id,
+                channel_id=channel_id,
+                defaults={
+                    'context_type': 'summary',
+                    'context_data': json.dumps({
+                        'summary_id': channel_summary.id,
+                        'summarized_channel': channel_name,
+                        'summary_text': summary,
+                        'timeframe_hours': timeframe_hours,
+                        'interaction_type': 'natural_language'
+                    }),
+                    'last_summary': channel_summary,
+                    'last_interaction_type': 'natural_language'
+                }
+            )
+            
+            # Send the summary
+            self._send_summary_message(channel_id, summary, user_id)
+            
+            # Update interaction
+            execution_time = time.time() - start_time
+            interaction.bot_response = "Summary generated successfully"
+            interaction.processing_time = execution_time
+            interaction.save()
+            
+        except Exception as e:
+            logger.error(f"Error processing natural current channel summary: {str(e)}")
+            error_msg = f"❌ Failed to generate summary. Error: {str(e)}"
+            self._send_error_message(channel_id, f"<@{user_id}> {error_msg}")
+            interaction.bot_response = error_msg
+            interaction.save()
+    
+    def _handle_help_request(self, user_id: str, channel_id: str, interaction: ChatbotInteraction) -> bool:
+        """Handle help requests"""
+        try:
+            help_response = self.responder.generate_help_response()
+            
+            self.client.chat_postMessage(
+                channel=channel_id,
+                text=f"<@{user_id}> {help_response}",
+                unfurl_links=False,
+                unfurl_media=False
+            )
+            
+            interaction.bot_response = help_response
+            interaction.save()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error handling help request: {str(e)}")
+            return False
+    
+    def _handle_greeting(self, user_id: str, channel_id: str, message: str, interaction: ChatbotInteraction) -> bool:
+        """Handle greetings"""
+        try:
+            greeting_response = self.responder.generate_greeting_response(message)
+            
+            self.client.chat_postMessage(
+                channel=channel_id,
+                text=f"<@{user_id}> {greeting_response}",
+                unfurl_links=False,
+                unfurl_media=False
+            )
+            
+            interaction.bot_response = greeting_response
+            interaction.save()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error handling greeting: {str(e)}")
+            return False
+    
+    def _handle_status_check(self, user_id: str, channel_id: str, interaction: ChatbotInteraction) -> bool:
+        """Handle status check requests"""
+        try:
+            status_response = self.responder.generate_status_response()
+            
+            self.client.chat_postMessage(
+                channel=channel_id,
+                text=f"<@{user_id}> {status_response}",
+                unfurl_links=False,
+                unfurl_media=False
+            )
+            
+            interaction.bot_response = status_response
+            interaction.save()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error handling status check: {str(e)}")
+            return False
+    
+    def _handle_general_chat(self, user_id: str, channel_id: str, message: str, interaction: ChatbotInteraction) -> bool:
+        """Handle general chat messages"""
+        try:
+            chat_response = self.responder.generate_general_chat_response(message)
+            
+            self.client.chat_postMessage(
+                channel=channel_id,
+                text=f"<@{user_id}> {chat_response}",
+                unfurl_links=False,
+                unfurl_media=False
+            )
+            
+            # Store conversation context for potential follow-ups
+            ConversationContext.objects.update_or_create(
+                user_id=user_id,
+                channel_id=channel_id,
+                defaults={
+                    'context_type': 'chat',
+                    'context_data': json.dumps({
+                        'last_message': message,
+                        'last_response': chat_response,
+                        'interaction_type': 'general_chat'
+                    }),
+                    'last_interaction_type': 'general_chat'
+                }
+            )
+            
+            interaction.bot_response = chat_response
+            interaction.save()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error handling general chat: {str(e)}")
+            return False
+    
     def _get_channel_messages(self, channel_id: str, hours: int = 24) -> List[Dict]:
         """
         Get messages from a channel within the specified time range
@@ -393,7 +788,7 @@ class SlackBotHandler:
             List of message dictionaries
         """
         try:
-            # Calculate timestamp for 24 hours ago
+            # Calculate timestamp for specified hours ago
             oldest = (datetime.now() - timedelta(hours=hours)).timestamp()
             
             messages = []
@@ -453,7 +848,7 @@ class SlackBotHandler:
     
     def process_message_event(self, event_data: Dict) -> bool:
         """
-        Process incoming message events for follow-up questions
+        Enhanced message event processing with natural language understanding
         
         Args:
             event_data: Slack event data
@@ -476,12 +871,24 @@ class SlackBotHandler:
         if not all([user_id, channel_id, text]):
             return False
         
-        # Check if user has recent conversation context
+        # Check if bot is mentioned or if this is a DM
+        is_mentioned = f'<@{self.bot_user_id}>' in text
+        is_dm = channel_id.startswith('D')  # Direct message channels start with 'D'
+        
+        # Remove bot mention from text for processing
+        if is_mentioned:
+            text = text.replace(f'<@{self.bot_user_id}>', '').strip()
+        
+        # Process if bot is mentioned or in DM
+        if is_mentioned or is_dm:
+            return self._process_natural_language_message(user_id, channel_id, text, event_data)
+        
+        # Check for follow-up questions (existing functionality)
         try:
             context = ConversationContext.objects.filter(
                 user_id=user_id,
                 channel_id=channel_id,
-                context_type='summary',
+                context_type__in=['summary', 'chat'],
                 updated_at__gte=timezone.now() - timedelta(hours=2)  # Context expires after 2 hours
             ).first()
             
@@ -494,66 +901,344 @@ class SlackBotHandler:
         
         return False
     
-    def _is_followup_question(self, text: str) -> bool:
+    def _process_natural_language_message(self, user_id: str, channel_id: str, text: str, event_data: Dict) -> bool:
         """
-        Determine if a message is likely a follow-up question about a summary
+        Process natural language messages using intent classification
         
         Args:
-            text: Message text
+            user_id: User ID
+            channel_id: Channel ID
+            text: Message text (with mentions removed)
+            event_data: Full event data
             
         Returns:
-            True if likely a follow-up question
+            True if message was processed
         """
-        question_indicators = [
-            '?', 'what', 'who', 'when', 'where', 'why', 'how',
-            'explain', 'tell me', 'can you', 'details', 'more info',
-            'elaborate', 'clarify', 'summary'
-        ]
+        start_time = time.time()
         
-        text_lower = text.lower()
-        return any(indicator in text_lower for indicator in question_indicators)
-    
-    def _handle_followup_question(self, context: ConversationContext, question: str, channel_id: str, user_id: str):
-        """
-        Handle follow-up questions about summaries
-        
-        Args:
-            context: Conversation context
-            question: User's question
-            channel_id: Channel ID
-            user_id: User ID
-        """
         try:
-            context_data = context.get_context_data()
-            summary_text = context_data.get('summary_text', '')
-            summarized_channel = context_data.get('summarized_channel', 'channel')
+            # Classify the intent
+            classification = self.intent_classifier.classify_intent(text, user_id)
+            intent = classification['intent']
+            confidence = classification['confidence']
+            parameters = classification.get('parameters', {})
             
-            if not summary_text:
-                return
-            
-            # Generate response using AI
-            response = self.summarizer.generate_followup_response(
-                question=question,
-                summary_context=summary_text,
-                channel_name=summarized_channel
+            # Log the interaction
+            interaction = ChatbotInteraction.objects.create(
+                user_id=user_id,
+                channel_id=channel_id,
+                message_type='natural_language',
+                user_message=text,
+                intent_classified=intent,
+                confidence_score=confidence,
+                processing_time=time.time() - start_time
             )
+            interaction.set_extracted_parameters(parameters)
             
-            # Send response
-            formatted_response = f"<@{user_id}> {response}"
+            # Handle different intents
+            if intent == 'summary_request':
+                return self._handle_natural_summary_request(user_id, channel_id, parameters, interaction)
+            elif intent == 'help_request':
+                return self._handle_help_request(user_id, channel_id, interaction)
+            elif intent == 'greeting':
+                return self._handle_greeting(user_id, channel_id, text, interaction)
+            elif intent == 'status_check':
+                return self._handle_status_check(user_id, channel_id, interaction)
+            else:  # general_chat
+                return self._handle_general_chat(user_id, channel_id, text, interaction)
+                
+        except Exception as e:
+            logger.error(f"Error processing natural language message: {str(e)}")
+            self._send_error_message(channel_id, f"<@{user_id}> I encountered an error processing your message. Please try again.")
+            return False
+    
+    def _handle_natural_summary_request(self, user_id: str, channel_id: str, parameters: Dict, interaction: ChatbotInteraction) -> bool:
+        """Handle natural language summary requests"""
+        try:
+            target_channel = parameters.get('channel_name')
+            timeframe_hours = parameters.get('timeframe_hours', 24)
+            timeframe_text = parameters.get('timeframe_text', 'Last 24 hours')
+            
+            # Send acknowledgment
+            if target_channel:
+                ack_message = f"<@{user_id}> Getting summary for #{target_channel} ({timeframe_text}) ⏳"
+            else:
+                ack_message = f"<@{user_id}> Getting summary for this channel ({timeframe_text}) ⏳"
             
             self.client.chat_postMessage(
                 channel=channel_id,
-                text=formatted_response,
+                text=ack_message,
                 unfurl_links=False,
                 unfurl_media=False
             )
             
-            # Update context timestamp
-            context.save()  # This updates updated_at automatically
+            # Process the summary
+            if target_channel:
+                self._process_natural_channel_summary(target_channel, channel_id, user_id, timeframe_hours, interaction)
+            else:
+                self._process_natural_current_channel_summary(channel_id, user_id, timeframe_hours, interaction)
+            
+            return True
             
         except Exception as e:
-            logger.error(f"Error handling follow-up question: {str(e)}")
-
+            logger.error(f"Error handling natural summary request: {str(e)}")
+            interaction.bot_response = f"Error: {str(e)}"
+            interaction.save()
+            return False
+    
+    def _process_natural_channel_summary(self, channel_name: str, response_channel_id: str, user_id: str, timeframe_hours: int, interaction: ChatbotInteraction):
+        """Process natural language channel summary request"""
+        start_time = time.time()
+        
+        try:
+            # Find the channel
+            channel_info = self._get_channel_info(channel_name)
+            if not channel_info:
+                error_msg = f"❌ Channel `#{channel_name}` not found or I don't have access to it."
+                self._send_error_message(response_channel_id, f"<@{user_id}> {error_msg}")
+                interaction.bot_response = error_msg
+                interaction.save()
+                return
+            
+            channel_id = channel_info['id']
+            
+            # Get messages from the channel
+            messages = self._get_channel_messages(channel_id, hours=timeframe_hours)
+            
+            # Filter to specified timeframe
+            recent_messages = filter_messages_by_timeframe(messages, hours=timeframe_hours)
+            
+            # Generate summary
+            summary = self.summarizer.generate_summary(recent_messages, channel_name, timeframe_hours)
+            
+            # Save summary to database
+            workspace, _ = SlackWorkspace.objects.get_or_create(
+                workspace_id="default",
+                defaults={'workspace_name': 'Default Workspace'}
+            )
+            
+            slack_channel, _ = SlackChannel.objects.get_or_create(
+                workspace=workspace,
+                channel_id=channel_id,
+                defaults={
+                    'channel_name': channel_name,
+                    'is_private': channel_info.get('is_private', False)
+                }
+            )
+            
+            channel_summary = ChannelSummary.objects.create(
+                channel=slack_channel,
+                summary_text=summary,
+                messages_count=len(recent_messages),
+                timeframe_hours=timeframe_hours,
+                requested_by_user=user_id
+            )
+            
+            # Store conversation context for follow-ups
+            ConversationContext.objects.update_or_create(
+                user_id=user_id,
+                channel_id=response_channel_id,
+                defaults={
+                    'context_type': 'summary',
+                    'context_data': json.dumps({
+                        'summary_id': channel_summary.id,
+                        'summarized_channel': channel_name,
+                        'summary_text': summary,
+                        'timeframe_hours': timeframe_hours,
+                        'interaction_type': 'natural_language'
+                    }),
+                    'last_summary': channel_summary,
+                    'last_interaction_type': 'natural_language'
+                }
+            )
+            
+            # Send the summary
+            self._send_summary_message(response_channel_id, summary, user_id)
+            
+            # Update interaction
+            execution_time = time.time() - start_time
+            interaction.bot_response = "Summary generated successfully"
+            interaction.processing_time = execution_time
+            interaction.save()
+            
+        except Exception as e:
+            logger.error(f"Error processing natural channel summary: {str(e)}")
+            error_msg = f"❌ Failed to generate summary for `#{channel_name}`. Error: {str(e)}"
+            self._send_error_message(response_channel_id, f"<@{user_id}> {error_msg}")
+            interaction.bot_response = error_msg
+            interaction.save()
+    
+    def _process_natural_current_channel_summary(self, channel_id: str, user_id: str, timeframe_hours: int, interaction: ChatbotInteraction):
+        """Process natural language current channel summary request"""
+        start_time = time.time()
+        
+        try:
+            # Get channel info
+            channel_info = self._get_channel_info_by_id(channel_id)
+            channel_name = channel_info.get('name', 'current-channel') if channel_info else 'current-channel'
+            
+            # Get messages from the current channel
+            messages = self._get_channel_messages(channel_id, hours=timeframe_hours)
+            
+            # Filter to specified timeframe
+            recent_messages = filter_messages_by_timeframe(messages, hours=timeframe_hours)
+            
+            # Generate summary
+            summary = self.summarizer.generate_summary(recent_messages, channel_name, timeframe_hours)
+            
+            # Save summary to database
+            workspace, _ = SlackWorkspace.objects.get_or_create(
+                workspace_id="default",
+                defaults={'workspace_name': 'Default Workspace'}
+            )
+            
+            slack_channel, _ = SlackChannel.objects.get_or_create(
+                workspace=workspace,
+                channel_id=channel_id,
+                defaults={
+                    'channel_name': channel_name,
+                    'is_private': channel_info.get('is_private', False) if channel_info else False
+                }
+            )
+            
+            channel_summary = ChannelSummary.objects.create(
+                channel=slack_channel,
+                summary_text=summary,
+                messages_count=len(recent_messages),
+                timeframe_hours=timeframe_hours,
+                requested_by_user=user_id
+            )
+            
+            # Store conversation context for follow-ups
+            ConversationContext.objects.update_or_create(
+                user_id=user_id,
+                channel_id=channel_id,
+                defaults={
+                    'context_type': 'summary',
+                    'context_data': json.dumps({
+                        'summary_id': channel_summary.id,
+                        'summarized_channel': channel_name,
+                        'summary_text': summary,
+                        'timeframe_hours': timeframe_hours,
+                        'interaction_type': 'natural_language'
+                    }),
+                    'last_summary': channel_summary,
+                    'last_interaction_type': 'natural_language'
+                }
+            )
+            
+            # Send the summary
+            self._send_summary_message(channel_id, summary, user_id)
+            
+            # Update interaction
+            execution_time = time.time() - start_time
+            interaction.bot_response = "Summary generated successfully"
+            interaction.processing_time = execution_time
+            interaction.save()
+            
+        except Exception as e:
+            logger.error(f"Error processing natural current channel summary: {str(e)}")
+            error_msg = f"❌ Failed to generate summary. Error: {str(e)}"
+            self._send_error_message(channel_id, f"<@{user_id}> {error_msg}")
+            interaction.bot_response = error_msg
+            interaction.save()
+    
+    def _handle_help_request(self, user_id: str, channel_id: str, interaction: ChatbotInteraction) -> bool:
+        """Handle help requests"""
+        try:
+            help_response = self.responder.generate_help_response()
+            
+            self.client.chat_postMessage(
+                channel=channel_id,
+                text=f"<@{user_id}> {help_response}",
+                unfurl_links=False,
+                unfurl_media=False
+            )
+            
+            interaction.bot_response = help_response
+            interaction.save()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error handling help request: {str(e)}")
+            return False
+    
+    def _handle_greeting(self, user_id: str, channel_id: str, message: str, interaction: ChatbotInteraction) -> bool:
+        """Handle greetings"""
+        try:
+            greeting_response = self.responder.generate_greeting_response(message)
+            
+            self.client.chat_postMessage(
+                channel=channel_id,
+                text=f"<@{user_id}> {greeting_response}",
+                unfurl_links=False,
+                unfurl_media=False
+            )
+            
+            interaction.bot_response = greeting_response
+            interaction.save()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error handling greeting: {str(e)}")
+            return False
+    
+    def _handle_status_check(self, user_id: str, channel_id: str, interaction: ChatbotInteraction) -> bool:
+        """Handle status check requests"""
+        try:
+            status_response = self.responder.generate_status_response()
+            
+            self.client.chat_postMessage(
+                channel=channel_id,
+                text=f"<@{user_id}> {status_response}",
+                unfurl_links=False,
+                unfurl_media=False
+            )
+            
+            interaction.bot_response = status_response
+            interaction.save()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error handling status check: {str(e)}")
+            return False
+    
+    def _handle_general_chat(self, user_id: str, channel_id: str, message: str, interaction: ChatbotInteraction) -> bool:
+        """Handle general chat messages"""
+        try:
+            chat_response = self.responder.generate_general_chat_response(message)
+            
+            self.client.chat_postMessage(
+                channel=channel_id,
+                text=f"<@{user_id}> {chat_response}",
+                unfurl_links=False,
+                unfurl_media=False
+            )
+            
+            # Store conversation context for potential follow-ups
+            ConversationContext.objects.update_or_create(
+                user_id=user_id,
+                channel_id=channel_id,
+                defaults={
+                    'context_type': 'chat',
+                    'context_data': json.dumps({
+                        'last_message': message,
+                        'last_response': chat_response,
+                        'interaction_type': 'general_chat'
+                    }),
+                    'last_interaction_type': 'general_chat'
+                }
+            )
+            
+            interaction.bot_response = chat_response
+            interaction.save()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error handling general chat: {str(e)}")
+            return False
+    
+    # ...existing code continues with previous methods...
 
 # Utility function for command handlers
 def verify_slack_signature(request_body: str, timestamp: str, signature: str) -> bool:
