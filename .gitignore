@@ -1,0 +1,172 @@
+# =============================================================================
+# AI-Powered Slack Bot - Git Ignore Rules
+# =============================================================================
+
+# Environment Variables & Secrets
+# =============================================================================
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+credentials/
+
+# Django
+# =============================================================================
+*.log
+*.pot
+*.pyc
+__pycache__/
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+static/
+
+# Django Migrations (keep structure, ignore data)
+# Uncomment if you want to ignore migrations entirely:
+# */migrations/
+# !*/migrations/__init__.py
+
+# Python
+# =============================================================================
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+# =============================================================================
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+.ENV/
+
+# IDE & Editor Files
+# =============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Development & Testing
+# =============================================================================
+.coverage
+.pytest_cache/
+.tox/
+.nox/
+htmlcov/
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Jupyter Notebooks
+# =============================================================================
+.ipynb_checkpoints
+
+# Node.js (if using any frontend tools)
+# =============================================================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Logs & Temporary Files
+# =============================================================================
+*.log
+*.tmp
+*.temp
+logs/
+temp/
+tmp/
+
+# ngrok
+# =============================================================================
+.ngrok/
+ngrok.log
+ngrok.yml
+
+# Backup Files
+# =============================================================================
+*.bak
+*.backup
+*.orig
+
+# OS Generated Files
+# =============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Slack Bot Specific
+# =============================================================================
+# Any files containing actual API keys or tokens
+*token*
+*secret*
+*key*
+# Exclude the template files
+!config/environment.example
+!*example*
+!*template*
+
+# Production Files
+# =============================================================================
+.env.production
+.env.staging
+docker-compose.override.yml
+Dockerfile.prod
+
+# Documentation Build
+# =============================================================================
+docs/_build/
+site/
+
+# =============================================================================
+# IMPORTANT SECURITY NOTE:
+# =============================================================================
+# This .gitignore is designed to prevent accidental commits of:
+# - API keys and tokens
+# - Environment variables
+# - Database files
+# - Logs with potentially sensitive data
+# 
+# Always double-check before committing that no sensitive information
+# is included in your commits!
+# ============================================================================= Demo.mov
+
+# Sample .env
+# DJANGO_SECRET_KEY=your-django-secret-key-here-generate-a-secure-random-string
+# DEBUG=True
