@@ -158,15 +158,36 @@ class ChannelCategory(models.Model):
     class Meta:
         unique_together = ('workspace', 'name')
         ordering = ['name']
+        indexes = [
+            models.Index(fields=['workspace', 'name']),
+            models.Index(fields=['created_by_user']),
+            models.Index(fields=['created_at']),
+        ]
+        verbose_name_plural = "Channel Categories"
     
     def __str__(self):
         return f"Category: {self.name} ({self.workspace.workspace_name})"
     
     def get_channels_count(self):
+        """Get the number of channels in this category"""
         return self.categorychannel_set.count()
     
     def get_channels(self):
+        """Get all channels in this category"""
         return SlackChannel.objects.filter(categorychannel__category=self)
+    
+    def get_channel_names(self):
+        """Get list of channel names in this category"""
+        return [f"#{ch.channel_name}" for ch in self.get_channels()]
+    
+    def can_add_channels(self, count=1):
+        """Check if we can add the specified number of channels"""
+        current_count = self.get_channels_count()
+        return current_count + count <= 5
+    
+    def get_available_slots(self):
+        """Get number of available slots for new channels"""
+        return max(0, 5 - self.get_channels_count())
 
 
 class CategoryChannel(models.Model):
@@ -179,9 +200,23 @@ class CategoryChannel(models.Model):
     class Meta:
         unique_together = ('category', 'channel')
         ordering = ['channel__channel_name']
+        indexes = [
+            models.Index(fields=['category']),
+            models.Index(fields=['channel']),
+            models.Index(fields=['added_by_user']),
+        ]
     
     def __str__(self):
         return f"{self.category.name} -> #{self.channel.channel_name}"
+    
+    def clean(self):
+        """Validate that a category doesn't exceed 5 channels"""
+        from django.core.exceptions import ValidationError
+        
+        if self.category_id:
+            current_count = CategoryChannel.objects.filter(category=self.category).count()
+            if self.pk is None and current_count >= 5:  # New record
+                raise ValidationError("A category cannot have more than 5 channels.")
 
 
 class CategorySummary(models.Model):
@@ -197,6 +232,21 @@ class CategorySummary(models.Model):
     
     class Meta:
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['category']),
+            models.Index(fields=['requested_by_user']),
+            models.Index(fields=['created_at']),
+        ]
+        verbose_name_plural = "Category Summaries"
     
     def __str__(self):
         return f"Category Summary for {self.category.name} at {self.created_at}"
+    
+    def get_summary_stats(self):
+        """Get summary statistics"""
+        return {
+            'channels_count': self.channels_count,
+            'total_messages': self.total_messages_count,
+            'timeframe': self.timeframe,
+            'created_at': self.created_at.strftime('%Y-%m-%d %H:%M')
+        }

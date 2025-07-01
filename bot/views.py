@@ -98,6 +98,12 @@ def handle_interactive_component(request):
             if callback_id == 'category_create_modal':
                 response = bot_handler.category_manager.handle_category_creation(payload)
                 return JsonResponse(response)
+            elif callback_id == 'manage_channels_modal':
+                response = bot_handler.category_manager.handle_manage_channels_submission(payload)
+                return JsonResponse(response)
+            elif callback_id == 'edit_category_modal':
+                response = bot_handler.category_manager.handle_edit_category_submission(payload)
+                return JsonResponse(response)
         
         elif payload_type == 'block_actions':
             # Handle button clicks and other block actions
