@@ -144,3 +144,59 @@ class UserReadStatus(models.Model):
     
     def __str__(self):
         return f"{self.user_id} in {self.channel_id}"
+
+
+class ChannelCategory(models.Model):
+    """Model to store channel categories"""
+    workspace = models.ForeignKey(SlackWorkspace, on_delete=models.CASCADE)
+    name = models.CharField(max_length=200)
+    description = models.TextField(blank=True)
+    created_by_user = models.CharField(max_length=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = ('workspace', 'name')
+        ordering = ['name']
+    
+    def __str__(self):
+        return f"Category: {self.name} ({self.workspace.workspace_name})"
+    
+    def get_channels_count(self):
+        return self.categorychannel_set.count()
+    
+    def get_channels(self):
+        return SlackChannel.objects.filter(categorychannel__category=self)
+
+
+class CategoryChannel(models.Model):
+    """Model to link channels to categories"""
+    category = models.ForeignKey(ChannelCategory, on_delete=models.CASCADE)
+    channel = models.ForeignKey(SlackChannel, on_delete=models.CASCADE)
+    added_by_user = models.CharField(max_length=100)
+    added_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        unique_together = ('category', 'channel')
+        ordering = ['channel__channel_name']
+    
+    def __str__(self):
+        return f"{self.category.name} -> #{self.channel.channel_name}"
+
+
+class CategorySummary(models.Model):
+    """Model to store category summaries across multiple channels"""
+    category = models.ForeignKey(ChannelCategory, on_delete=models.CASCADE)
+    summary_text = models.TextField()
+    channels_count = models.IntegerField()
+    total_messages_count = models.IntegerField()
+    timeframe = models.CharField(max_length=100, default="Last 24 hours")
+    timeframe_hours = models.IntegerField(default=24)
+    requested_by_user = models.CharField(max_length=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"Category Summary for {self.category.name} at {self.created_at}"

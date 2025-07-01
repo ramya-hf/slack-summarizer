@@ -29,13 +29,21 @@ ngrok http 8000
 
 ### Configure Slash Commands:
 1. Go to **"Slash Commands"** in the sidebar
-2. Click **"Create New Command"** (or edit existing)
-3. Fill in:
+2. Click **"Create New Command"** for each command:
+
+**Command 1: Summary**
    - **Command**: `/summary`
    - **Request URL**: `https://YOUR-NGROK-URL.ngrok.io/slack/events/`
    - **Short Description**: `Summarize channel messages using AI`
    - **Usage Hint**: `[channel-name] (optional)`
-4. Click **"Save"**
+
+**Command 2: Category**
+   - **Command**: `/category`
+   - **Request URL**: `https://YOUR-NGROK-URL.ngrok.io/slack/events/`
+   - **Short Description**: `Manage channel categories for group summaries`
+   - **Usage Hint**: `create | list | help`
+
+3. Click **"Save"** for each command
 
 ### Configure Event Subscriptions:
 1. Go to **"Event Subscriptions"** in the sidebar
@@ -95,6 +103,21 @@ Your bot now exposes these endpoints:
   - `/summary general` → summarizes #general channel
   - `/summary dev-team` → summarizes #dev-team channel
   - `/summary marketing` → summarizes #marketing channel
+
+### `/category create`
+- **Description**: Create a new category with 2-5 channels
+- **Usage**: `/category create`
+- **Example**: Opens a modal to create category with selected channels
+
+### `/category list`
+- **Description**: View all categories with management options
+- **Usage**: `/category list`
+- **Example**: Shows all categories with action menus
+
+### `/category help`
+- **Description**: Show category management help
+- **Usage**: `/category help`
+- **Example**: Displays help for category commands
 
 ## 6. How It Works
 
@@ -165,6 +188,8 @@ Your Slack Channel Summarizer Bot is now fully functional and ready to help your
 ### Quick Start Commands:
 - `/summary` - Summarize current channel
 - `/summary general` - Summarize #general channel
+- `/category create` - Create a new category
+- `/category list` - View all categories
 - Ask follow-up questions after any summary
 
 ### Need Help?

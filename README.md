@@ -28,6 +28,50 @@ Summarize a specific channel (last 24 hours)
 /summary marketing
 ```
 
+### `/category create`
+Create a new category with 2-5 channels
+```
+/category create
+```
+
+### `/category list`
+View all categories with management options
+```
+/category list
+```
+
+### `/category help`
+Show category management help
+```
+/category help
+```
+
+## Category Management Features
+
+### Creating Categories
+1. Use `/category create` to open the creation modal
+2. Enter category name and description
+3. Select 2-5 channels from the dropdown
+4. Click "Create" to save the category
+
+### Managing Categories
+1. Use `/category list` to view all categories
+2. Each category shows:
+   - Category name and description
+   - List of channels in the category
+   - Creation date
+   - Action menu with options:
+     - **Summarize Category**: Generate AI summary of all channels
+     - **Add Channels**: Add more channels to the category
+     - **Edit Details**: Modify name and description
+     - **Delete Category**: Remove category and associations
+
+### Category Summaries
+- Generate comprehensive summaries across multiple channels
+- AI analyzes messages from all channels in the category
+- Provides cross-channel insights and patterns
+- Identifies collaboration and shared themes
+
 ## Installation & Setup
 
 ### 1. Prerequisites
