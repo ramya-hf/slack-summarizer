@@ -72,7 +72,10 @@ class SlackBotHandler:
         user_id = payload.get('user_id')
         channel_id = payload.get('channel_id')
         
-        # Log the command
+        # Log the command for debugging
+        logger.info(f"Processing slash command: {command} with text: '{text}' from user: {user_id} in channel: {channel_id}")
+        
+        # Log the command to database
         bot_command = BotCommand.objects.create(
             command=command,
             user_id=user_id,
@@ -87,7 +90,7 @@ class SlackBotHandler:
             elif command == '/category':
                 return self._handle_category_command(payload, bot_command)
             else:
-                return self._handle_unknown_command(command)
+                return self._handle_unknown_command(command, bot_command)
                 
         except Exception as e:
             logger.error(f"Error processing command {command}: {str(e)}")
@@ -187,12 +190,12 @@ class SlackBotHandler:
             
             return {"response_type": "ephemeral", "text": ""}
     
-    def _send_acknowledgment_message(self, channel_id: str, user_id: str, custom_message: str = "Your summary is getting generated ⏳"):
+    def _send_acknowledgment_message(self, channel_id: str, user_id: str):
         """Send acknowledgment message to user"""
         try:
             self.client.chat_postMessage(
                 channel=channel_id,
-                text=f"<@{user_id}> {custom_message}",
+                text=f"<@{user_id}> Your summary is getting generated ⏳",
                 unfurl_links=False,
                 unfurl_media=False
             )
@@ -1175,19 +1178,19 @@ class SlackBotHandler:
         channel_id = payload.get('channel_id')
         trigger_id = payload.get('trigger_id')
         
+        logger.info(f"Processing category command with subcommand: '{text}'")
+        
         try:
             if text == 'create':
                 # Open modal for category creation
-                if self.category_manager.create_category_modal(trigger_id, user_id):
+                modal_success = self.category_manager.create_category_modal(trigger_id, user_id)
+                
+                if modal_success:
                     bot_command.status = 'completed'
                     bot_command.save()
-                    
-                    # Send immediate response about modal opening
-                    self._send_acknowledgment_message(channel_id, user_id, "Category creation form is opening...")
-                    
                     return {
                         "response_type": "ephemeral",
-                        "text": "📝 Category creation form opened! Fill out the details and click Create."
+                        "text": "Opening category creation form..."
                     }
                 else:
                     bot_command.status = 'failed'
@@ -1195,28 +1198,66 @@ class SlackBotHandler:
                     bot_command.save()
                     return {
                         "response_type": "ephemeral",
-                        "text": "❌ Failed to open category creation form. Please ensure the bot has proper permissions and try again."
+                        "text": "❌ Failed to open category creation form. Please check if the bot has proper permissions and try again."
                     }
             
             elif text == 'list':
                 # List all categories
-                self.category_manager.list_categories(user_id, channel_id)
-                bot_command.status = 'completed'
-                bot_command.save()
-                return {
-                    "response_type": "ephemeral",
-                    "text": "📋 Loading your categories..."
-                }
+                try:
+                    list_success = self.category_manager.list_categories(user_id, channel_id)
+                    if list_success:
+                        bot_command.status = 'completed'
+                        bot_command.save()
+                        return {
+                            "response_type": "ephemeral",
+                            "text": "📋 Fetching your categories..."
+                        }
+                    else:
+                        bot_command.status = 'failed'
+                        bot_command.error_message = 'Failed to list categories'
+                        bot_command.save()
+                        return {
+                            "response_type": "ephemeral",
+                            "text": "❌ Failed to list categories. Please try again."
+                        }
+                except Exception as e:
+                    logger.error(f"Error in category list: {str(e)}")
+                    bot_command.status = 'failed'
+                    bot_command.error_message = str(e)
+                    bot_command.save()
+                    return {
+                        "response_type": "ephemeral",
+                        "text": "❌ Failed to list categories. Please try again."
+                    }
             
             elif text == 'help' or text == '':
                 # Show help
-                self.category_manager.show_help(user_id, channel_id)
-                bot_command.status = 'completed'
-                bot_command.save()
-                return {
-                    "response_type": "ephemeral",
-                    "text": "📚 Category help is on the way..."
-                }
+                try:
+                    help_success = self.category_manager.show_help(user_id, channel_id)
+                    if help_success:
+                        bot_command.status = 'completed'
+                        bot_command.save()
+                        return {
+                            "response_type": "ephemeral",
+                            "text": "📚 Loading help information..."
+                        }
+                    else:
+                        bot_command.status = 'failed'
+                        bot_command.error_message = 'Failed to show help'
+                        bot_command.save()
+                        return {
+                            "response_type": "ephemeral",
+                            "text": "❌ Failed to load help. Please try again."
+                        }
+                except Exception as e:
+                    logger.error(f"Error in category help: {str(e)}")
+                    bot_command.status = 'failed'
+                    bot_command.error_message = str(e)
+                    bot_command.save()
+                    return {
+                        "response_type": "ephemeral",
+                        "text": "❌ Failed to load help. Please try again."
+                    }
             
             else:
                 # Unknown subcommand
@@ -1225,7 +1266,7 @@ class SlackBotHandler:
                 bot_command.save()
                 return {
                     "response_type": "ephemeral",
-                    "text": f"❓ Unknown subcommand `{text}`. Available commands:\n• `/category create` - Create new category\n• `/category list` - List all categories\n• `/category help` - Show detailed help"
+                    "text": f"❓ Unknown subcommand `{text}`. Use `/category help` to see available commands."
                 }
                 
         except Exception as e:
@@ -1239,38 +1280,21 @@ class SlackBotHandler:
                 "text": "❌ An error occurred while processing your category command. Please try again later."
             }
     
-    def handle_category_creation_success(self, user_id: str, channel_id: str, category_name: str, channels_added: list, description: str = ""):
-        """
-        Handle successful category creation by sending confirmation message
+    def _handle_unknown_command(self, command: str, bot_command: BotCommand) -> Dict:
+        """Handle unknown commands"""
+        bot_command.status = 'failed'
+        bot_command.error_message = f'Unknown command: {command}'
+        bot_command.save()
         
-        Args:
-            user_id: User who created the category
-            channel_id: Channel to send the message to
-            category_name: Name of the created category
-            channels_added: List of channel names added
-            description: Category description
-        """
-        try:
-            success_message = (
-                f"<@{user_id}> ✅ *Category '{category_name}' created successfully!*\n\n"
-                f"📝 *Description:* {description or 'No description provided'}\n"
-                f"📋 *Channels:* {', '.join(channels_added)}\n\n"
-                f"💡 Use `/category list` to manage your categories or `/category help` for more options."
-            )
-            
-            self.client.chat_postMessage(
-                channel=channel_id,
-                text=success_message,
-                unfurl_links=False,
-                unfurl_media=False
-            )
-            
-        except SlackApiError as e:
-            logger.error(f"Failed to send category creation success message: {e}")
-
+        return {
+            "response_type": "ephemeral",
+            "text": f"❓ Unknown command `{command}`. Available commands:\n• `/summary` - Summarize current channel (last 24 hours)\n• `/summary [channel-name]` - Summarize specific channel\n• `/summary unread` - Summarize unread messages in current channel\n• `/summary unread [channel-name]` - Summarize unread messages in specific channel\n• `/summary thread latest` - Summarize latest thread in current channel\n• `/summary thread latest [channel-name]` - Summarize latest thread in specific channel\n• `/summary thread [message-link]` - Summarize specific thread\n• `/category create` - Create a new category\n• `/category list` - List all categories\n• `/category help` - Show category help"
+        }
+    
     def process_message_event(self, event_data: Dict) -> bool:
         """
         Enhanced message event processing with natural language understanding
+        IMPORTANT: Only process messages for our specific bot, ignore other bots
         
         Args:
             event_data: Slack event data
@@ -1279,6 +1303,14 @@ class SlackBotHandler:
             True if message was processed, False otherwise
         """
         event = event_data.get('event', {})
+        
+        # Get the bot user ID that sent the event
+        bot_id = event_data.get('authorizations', [{}])[0].get('user_id')
+        
+        # Only process events meant for OUR bot, ignore if it's for slackbot or other bots
+        if bot_id and bot_id != self.bot_user_id:
+            logger.debug(f"Ignoring event for different bot: {bot_id}")
+            return False
         
         # Ignore bot messages and system messages
         if (event.get('bot_id') or 
@@ -1291,6 +1323,11 @@ class SlackBotHandler:
         text = event.get('text', '').strip()
         
         if not all([user_id, channel_id, text]):
+            return False
+        
+        # Check if this is a command that slackbot might interfere with
+        if any(text.lower().startswith(cmd) for cmd in ['/category', '/summary']):
+            logger.debug(f"Ignoring command-like message to prevent slackbot interference: {text}")
             return False
         
         # Check if bot is mentioned or if this is a DM
@@ -1310,7 +1347,7 @@ class SlackBotHandler:
             context = ConversationContext.objects.filter(
                 user_id=user_id,
                 channel_id=channel_id,
-                context_type__in=['summary', 'chat'],
+                context_type__in=['summary', 'chat', 'category_summary'],
                 updated_at__gte=timezone.now() - timedelta(hours=2)  # Context expires after 2 hours
             ).first()
             

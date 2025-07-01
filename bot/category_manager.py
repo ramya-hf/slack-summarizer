@@ -126,20 +126,13 @@ class CategoryManager:
                             "action_id": "channels_select",
                             "placeholder": {
                                 "type": "plain_text",
-                                "text": "Select 2-5 channels for this category"
+                                "text": "Select 2-5 channels"
                             },
                             "options": channel_options
                         },
                         "label": {
                             "type": "plain_text",
-                            "text": "Channels"
-                        }
-                    },
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": "⚠️ *Important:* Please select between 2 and 5 channels for your category."
+                            "text": "Channels (2-5 required)"
                         }
                     },
                     {
@@ -147,6 +140,13 @@ class CategoryManager:
                         "text": {
                             "type": "mrkdwn",
                             "text": "💡 *Tip: Categories help you get summaries across multiple related channels at once.*"
+                        }
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "⚠️ *Please select between 2-5 channels for your category.*"
                         }
                     }
                 ],
@@ -190,21 +190,18 @@ class CategoryManager:
             selected_channels = values.get('category_channels', {}).get('channels_select', {}).get('selected_options', [])
             
             if not category_name:
-                return self._create_error_response("category_name", "Category name is required")
-            
-            if not selected_channels:
-                return self._create_error_response("category_channels", "Please select at least 2 channels")
+                return self._create_error_response("Category name is required")
             
             if len(selected_channels) < 2:
-                return self._create_error_response("category_channels", "Please select at least 2 channels")
+                return self._create_error_response("Please select at least 2 channels")
             
             if len(selected_channels) > 5:
-                return self._create_error_response("category_channels", "Please select no more than 5 channels")
+                return self._create_error_response("Please select no more than 5 channels")
             
             # Check if category name already exists
             workspace = self._get_or_create_workspace()
             if ChannelCategory.objects.filter(workspace=workspace, name=category_name).exists():
-                return self._create_error_response("category_name", f"Category '{category_name}' already exists")
+                return self._create_error_response(f"Category '{category_name}' already exists")
             
             # Create the category
             category = ChannelCategory.objects.create(
@@ -218,22 +215,17 @@ class CategoryManager:
             channels_added = []
             for channel_option in selected_channels:
                 try:
-                    channel_id, channel_name_from_option = channel_option['value'].split('|', 1)
+                    channel_id, channel_name = channel_option['value'].split('|', 1)
                     
                     # Get or create the channel
                     slack_channel, created = SlackChannel.objects.get_or_create(
                         workspace=workspace,
                         channel_id=channel_id,
                         defaults={
-                            'channel_name': channel_name_from_option,
+                            'channel_name': channel_name,
                             'is_private': False  # Will be updated if needed
                         }
                     )
-                    
-                    # Check if channel is already in another category (optional constraint)
-                    # existing_category = CategoryChannel.objects.filter(channel=slack_channel).first()
-                    # if existing_category:
-                    #     logger.warning(f"Channel {channel_name_from_option} already in category {existing_category.category.name}")
                     
                     # Link channel to category
                     CategoryChannel.objects.create(
@@ -242,24 +234,39 @@ class CategoryManager:
                         added_by_user=user_id
                     )
                     
-                    channels_added.append(f"#{channel_name_from_option}")
+                    channels_added.append(f"#{channel_name}")
                     
-                except (ValueError, KeyError) as e:
-                    logger.error(f"Error processing channel option: {channel_option}, error: {str(e)}")
+                except Exception as e:
+                    logger.error(f"Error adding channel to category: {str(e)}")
                     continue
-            
-            if not channels_added:
-                # If no channels were successfully added, delete the category
-                category.delete()
-                return self._create_error_response("category_channels", "Failed to add channels to category. Please try again.")
             
             logger.info(f"Category '{category_name}' created by {user_id} with {len(channels_added)} channels")
             
-            # Send success message to the channel where the command was issued
+            # Send success notification via separate API call (not modal response)
+            self._send_category_creation_success(user_id, category_name, description, channels_added)
+            
+            # Return proper modal close response
+            return {"response_action": "clear"}
+            
+        except Exception as e:
+            logger.error(f"Error handling category creation: {str(e)}")
+            return self._create_error_response(f"Failed to create category: {str(e)}")
+    
+    def _send_category_creation_success(self, user_id: str, category_name: str, description: str, channels_added: List[str]):
+        """
+        Send success message after category creation
+        
+        Args:
+            user_id: User who created the category
+            category_name: Name of the created category
+            description: Category description
+            channels_added: List of channel names added
+        """
+        try:
+            # Try to send a DM to the user first
             try:
-                # Get the channel_id from the trigger interaction if available
-                user_info = payload.get('user', {})
-                # We'll send a follow-up message since modal responses are limited
+                dm_response = self.client.conversations_open(users=user_id)
+                dm_channel_id = dm_response['channel']['id']
                 
                 success_message = (
                     f"✅ *Category '{category_name}' created successfully!*\n\n"
@@ -268,22 +275,22 @@ class CategoryManager:
                     f"💡 Use `/category list` to manage your categories or `/category help` for more options."
                 )
                 
-                # Since we can't easily get the original channel from modal context,
-                # we'll use a different approach - clear the modal and let the user know
-                return {
-                    "response_action": "clear"
-                }
+                self.client.chat_postMessage(
+                    channel=dm_channel_id,
+                    text=success_message,
+                    unfurl_links=False,
+                    unfurl_media=False
+                )
                 
-            except Exception as e:
-                logger.error(f"Error sending success message: {str(e)}")
-                # Still return success for the modal
-                return {
-                    "response_action": "clear"
-                }
-            
+                logger.info(f"Success message sent via DM to user {user_id}")
+                
+            except SlackApiError as dm_error:
+                # If DM fails, we'll handle it gracefully
+                logger.warning(f"Could not send DM to user {user_id}: {dm_error}")
+                
         except Exception as e:
-            logger.error(f"Error handling category creation: {str(e)}")
-            return self._create_error_response("category_name", f"Failed to create category: {str(e)}")
+            logger.error(f"Error sending category creation success message: {str(e)}")
+
     
     def list_categories(self, user_id: str, channel_id: str) -> bool:
         """
@@ -812,11 +819,11 @@ Categories let you group related channels together for:
         except SlackApiError as e:
             logger.error(f"Failed to send message: {e}")
     
-    def _create_error_response(self, field_id: str, error_message: str) -> Dict:
+    def _create_error_response(self, error_message: str) -> Dict:
         """Create error response for modal submissions"""
         return {
             "response_action": "errors",
             "errors": {
-                field_id: error_message
+                "category_name": error_message
             }
         }

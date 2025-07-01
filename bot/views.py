@@ -97,32 +97,6 @@ def handle_interactive_component(request):
             
             if callback_id == 'category_create_modal':
                 response = bot_handler.category_manager.handle_category_creation(payload)
-                
-                # If category was created successfully, send a follow-up message
-                if response.get("response_action") == "clear":
-                    # Extract user info to send success message
-                    user_id = payload.get('user', {}).get('id')
-                    # We need to find a way to get the original channel_id
-                    # For now, we'll handle this in the category manager
-                    
-                    # Send success message via DM or use the trigger channel
-                    try:
-                        # Get user info to send DM
-                        user_dm_channel = bot_handler.client.conversations_open(users=user_id)
-                        dm_channel_id = user_dm_channel.get('channel', {}).get('id')
-                        
-                        if dm_channel_id:
-                            success_msg = (
-                                "✅ *Category created successfully!*\n\n"
-                                "Use `/category list` in any channel to view and manage your categories."
-                            )
-                            bot_handler.client.chat_postMessage(
-                                channel=dm_channel_id,
-                                text=success_msg
-                            )
-                    except Exception as e:
-                        logger.error(f"Failed to send success DM: {str(e)}")
-                
                 return JsonResponse(response)
         
         elif payload_type == 'block_actions':
@@ -135,12 +109,11 @@ def handle_interactive_component(request):
                 if action_id.startswith('category_actions_'):
                     success = bot_handler.category_manager.handle_category_action(payload)
                     if success:
-                        return JsonResponse({"text": "✅ Action completed successfully"})
+                        return JsonResponse({"text": "Action processed successfully"})
                     else:
-                        return JsonResponse({"text": "❌ Failed to process action"})
+                        return JsonResponse({"text": "Failed to process action"}, status=500)
         
         # Default response for unhandled interactive components
-        logger.info(f"Unhandled interactive component type: {payload_type}")
         return JsonResponse({"text": "Component processed"})
         
     except json.JSONDecodeError:

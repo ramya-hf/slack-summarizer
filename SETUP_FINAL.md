@@ -22,10 +22,24 @@ ngrok http 8000
 
 ## 2. Slack App Configuration
 
-### Update Your Slack App Settings:
+### Important: Disable Slackbot for Your Commands
 
-1. **Go to your Slack App**: https://api.slack.com/apps
-2. **Select your app** (the one you created earlier)
+**To prevent slackbot from interfering with your custom bot:**
+
+1. Go to your Slack workspace settings
+2. Navigate to **Settings & administration** → **Workspace settings**
+3. Click on **Permissions** tab
+4. Under **App Management**, click **Manage apps**
+5. Find and configure **Slackbot**
+6. In Slackbot settings, add these patterns to **ignored patterns**:
+   - `/summary*`
+   - `/category*`
+
+**Alternative method:**
+1. In any channel, type `/slackbot` 
+2. Add custom responses to override default behavior:
+   - Pattern: `/summary*` → Response: (leave empty)
+   - Pattern: `/category*` → Response: (leave empty)
 
 ### Configure Slash Commands:
 1. Go to **"Slash Commands"** in the sidebar
@@ -36,14 +50,22 @@ ngrok http 8000
    - **Request URL**: `https://YOUR-NGROK-URL.ngrok.io/slack/events/`
    - **Short Description**: `Summarize channel messages using AI`
    - **Usage Hint**: `[channel-name] (optional)`
+   - **Escape channels, users, and links sent to your app**: ✅ **CHECKED**
 
 **Command 2: Category**
    - **Command**: `/category`
    - **Request URL**: `https://YOUR-NGROK-URL.ngrok.io/slack/events/`
    - **Short Description**: `Manage channel categories for group summaries`
    - **Usage Hint**: `create | list | help`
+   - **Escape channels, users, and links sent to your app**: ✅ **CHECKED**
 
 3. Click **"Save"** for each command
+
+### Configure Interactivity & Shortcuts:
+1. Go to **"Interactivity & Shortcuts"** in the sidebar
+2. **Turn on Interactivity**: Toggle ON
+3. **Request URL**: `https://YOUR-NGROK-URL.ngrok.io/slack/events/`
+4. Click **"Save Changes"**
 
 ### Configure Event Subscriptions:
 1. Go to **"Event Subscriptions"** in the sidebar
@@ -148,6 +170,12 @@ Your bot now exposes these endpoints:
 ✅ **Bot message filtering**: Excludes bot messages from summaries
 ✅ **Conversation context**: Maintains context for follow-up questions
 ✅ **Security**: Slack signature verification for all requests
+✅ **Modal submission errors**: Proper error responses and user feedback
+✅ **Slackbot interference**: Prevents conflicts with default Slack commands
+✅ **Category validation**: Ensures 2-5 channels per category
+✅ **Duplicate categories**: Prevents duplicate category names
+✅ **Interactive components**: Proper handling of buttons and overflow menus
+✅ **Cross-channel insights**: Advanced category summarization
 
 ## 8. Monitoring & Debugging
 
