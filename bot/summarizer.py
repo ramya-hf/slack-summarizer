@@ -461,12 +461,53 @@ def extract_channel_name_from_command(command_text: str) -> Optional[str]:
     # Remove the command part and get the channel name
     parts = command_text.strip().split()
     if len(parts) >= 2:
+        # Check if it's a category command
+        if parts[1].lower() == 'category':
+            return None  # This is handled by extract_category_command_details
+        
         channel_name = parts[1].strip()
         # Remove # if present
         if channel_name.startswith('#'):
             channel_name = channel_name[1:]
         return channel_name
     return None
+
+
+def extract_category_command_details(command_text: str) -> Tuple[Optional[str], bool]:
+    """
+    Extract category name from command text like "/summary category category-name"
+    
+    Args:
+        command_text: The full command text
+        
+    Returns:
+        Tuple of (category_name, is_category_command)
+    """
+    parts = command_text.strip().split()
+    
+    # Check if it's a category command
+    if len(parts) >= 3 and parts[1].lower() == 'category':
+        category_name = parts[2].strip()
+        # Remove any special characters if present
+        if category_name.startswith('#'):
+            category_name = category_name[1:]
+        return category_name, True
+    
+    return None, False
+
+
+def is_category_command(command_text: str) -> bool:
+    """
+    Check if the command is a category-related command
+    
+    Args:
+        command_text: The full command text
+        
+    Returns:
+        True if it's a category command
+    """
+    parts = command_text.strip().split()
+    return len(parts) >= 3 and parts[1].lower() == 'category'
 
 
 def extract_unread_command_details(command_text: str) -> Tuple[Optional[str], bool]:
