@@ -8,19 +8,21 @@ A powerful Django-based Slack bot that uses Google Gemini AI to summarize channe
 - 📊 **Structured Summaries**: Provides consistent, well-formatted summaries with key topics, decisions, and action items
 - 💬 **Follow-up Questions**: Answer questions about generated summaries using AI
 - 🔄 **Multi-Channel Support**: Summarize any channel you have access to
-- 📱 **Slash Commands**: Easy-to-use `/summary` command with subcommands
+- 📱 **Slash Commands**: Easy-to-use `/summary` and `/category` commands with subcommands
 - 🗄️ **Database Storage**: Stores summaries and conversation context for reference
 - 🛡️ **Security**: Proper Slack signature verification and environment variable management
 
 ## Commands
 
-### `/summary`
+### Summary Commands
+
+#### `/summary`
 Summarize the current channel (last 24 hours)
 ```
 /summary
 ```
 
-### `/summary [channel-name]`
+#### `/summary [channel-name]`
 Summarize a specific channel (last 24 hours)
 ```
 /summary general
@@ -28,19 +30,21 @@ Summarize a specific channel (last 24 hours)
 /summary marketing
 ```
 
-### `/category create`
+### Category Commands
+
+#### `/category create`
 Create a new category with 2-5 channels
 ```
 /category create
 ```
 
-### `/category list`
+#### `/category list`
 View all categories with management options
 ```
 /category list
 ```
 
-### `/category help`
+#### `/category help`
 Show category management help
 ```
 /category help

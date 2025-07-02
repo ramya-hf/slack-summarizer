@@ -735,3 +735,827 @@ class CategoryManager:
                 "category_name": error_message
             }
         }
+    
+    def _get_available_channels(self) -> List[Dict]:
+        """Get list of available channels for category creation"""
+        try:
+            response = self.client.conversations_list(
+                types="public_channel,private_channel",
+                limit=1000,
+                exclude_archived=True
+            )
+            
+            channels = response.get('channels', [])
+            
+            # Filter out channels that might not be suitable
+            available_channels = []
+            for channel in channels:
+                if (not channel.get('is_archived', False) and 
+                    not channel.get('is_general', False) and  # Usually exclude #general
+                    channel.get('is_member', True)):  # Bot must be a member
+                    available_channels.append({
+                        'id': channel['id'],
+                        'name': channel['name'],
+                        'is_private': channel.get('is_private', False)
+                    })
+            
+            # Sort by name for better UX
+            available_channels.sort(key=lambda x: x['name'])
+            
+            return available_channels
+            
+        except SlackApiError as e:
+            logger.error(f"Error getting available channels: {e}")
+            return []
+
+    def open_edit_category_modal(self, trigger_id: str, user_id: str, category_id: int) -> bool:
+        """
+        Open modal for editing category details
+        
+        Args:
+            trigger_id: Slack trigger ID for modal
+            user_id: User requesting the modal
+            category_id: ID of category to edit
+            
+        Returns:
+            True if modal opened successfully
+        """
+        try:
+            # Get the category
+            category = ChannelCategory.objects.get(id=category_id)
+            
+            # Get current channels in category
+            current_channels = category.get_channels()
+            channel_names = [f"#{ch.channel_name}" for ch in current_channels]
+            
+            modal_view = {
+                "type": "modal",
+                "callback_id": "edit_category_modal",
+                "title": {
+                    "type": "plain_text",
+                    "text": "Edit Category"
+                },
+                "submit": {
+                    "type": "plain_text",
+                    "text": "Save Changes"
+                },
+                "close": {
+                    "type": "plain_text",
+                    "text": "Cancel"
+                },
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*Editing category: {category.name}*\n\nCurrent channels: {', '.join(channel_names)}"
+                        }
+                    },
+                    {
+                        "type": "divider"
+                    },
+                    {
+                        "type": "input",
+                        "block_id": "category_name",
+                        "element": {
+                            "type": "plain_text_input",
+                            "action_id": "name_input",
+                            "initial_value": category.name,
+                            "placeholder": {
+                                "type": "plain_text",
+                                "text": "e.g., Development Team"
+                            },
+                            "max_length": 200
+                        },
+                        "label": {
+                            "type": "plain_text",
+                            "text": "Category Name"
+                        }
+                    },
+                    {
+                        "type": "input",
+                        "block_id": "category_description",
+                        "element": {
+                            "type": "plain_text_input",
+                            "action_id": "description_input",
+                            "multiline": True,
+                            "initial_value": category.description or "",
+                            "placeholder": {
+                                "type": "plain_text",
+                                "text": "Describe what this category represents..."
+                            },
+                            "max_length": 1000
+                        },
+                        "label": {
+                            "type": "plain_text",
+                            "text": "Description"
+                        },
+                        "optional": True
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "💡 *Use 'Manage Channels' from the main menu to add or remove channels from this category.*"
+                        }
+                    }
+                ],
+                "private_metadata": json.dumps({
+                    "user_id": user_id,
+                    "category_id": category_id,
+                    "original_name": category.name
+                })
+            }
+            
+            response = self.client.views_open(
+                trigger_id=trigger_id,
+                view=modal_view
+            )
+            
+            logger.info(f"Edit category modal opened for category {category_id} by user {user_id}")
+            return True
+            
+        except ChannelCategory.DoesNotExist:
+            logger.error(f"Category {category_id} not found")
+            self._send_message_to_user(user_id, "❌ Category not found.")
+            return False
+        except SlackApiError as e:
+            logger.error(f"Error opening edit category modal: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error opening edit category modal: {str(e)}")
+            return False
+
+    def handle_edit_category_submission(self, payload: Dict) -> Dict:
+        """
+        Handle edit category modal submission
+        
+        Args:
+            payload: Slack modal submission payload
+            
+        Returns:
+            Response dictionary for Slack
+        """
+        try:
+            # Extract form data
+            values = payload.get('view', {}).get('state', {}).get('values', {})
+            private_metadata = json.loads(payload.get('view', {}).get('private_metadata', '{}'))
+            
+            user_id = private_metadata.get('user_id')
+            category_id = private_metadata.get('category_id')
+            original_name = private_metadata.get('original_name')
+            
+            # Validate required data
+            if not all([user_id, category_id]):
+                return self._create_error_response("Missing required information")
+            
+            # Get form values
+            new_name = values.get('category_name', {}).get('name_input', {}).get('value', '').strip()
+            new_description = values.get('category_description', {}).get('description_input', {}).get('value', '').strip()
+            
+            if not new_name:
+                return self._create_error_response("Category name is required")
+            
+            # Get the category
+            category = ChannelCategory.objects.get(id=category_id)
+            workspace = category.workspace
+            
+            # Check if new name conflicts with existing category (if name changed)
+            if new_name != original_name:
+                if ChannelCategory.objects.filter(workspace=workspace, name=new_name).exclude(id=category_id).exists():
+                    return self._create_error_response(f"Category name '{new_name}' already exists")
+            
+            # Update the category
+            old_name = category.name
+            old_description = category.description
+            
+            category.name = new_name
+            category.description = new_description
+            category.updated_at = timezone.now()
+            category.save()
+            
+            # Build success message
+            changes = []
+            if old_name != new_name:
+                changes.append(f"Name: '{old_name}' → '{new_name}'")
+            
+            if old_description != new_description:
+                if old_description:
+                    changes.append(f"Description updated")
+                else:
+                    changes.append(f"Description added")
+            
+            if changes:
+                success_message = f"✅ Category updated successfully!\n\n🔄 Changes made:\n• " + "\n• ".join(changes)
+            else:
+                success_message = f"✅ Category '{new_name}' saved (no changes detected)."
+            
+            success_message += f"\n\n💡 Use `/category list` to see all your categories."
+            
+            logger.info(f"Category {category_id} updated by user {user_id}. Changes: {len(changes)}")
+            
+            # Send success notification
+            self._send_message_to_user(user_id, success_message)
+            
+            # Return proper modal close response
+            return {"response_action": "clear"}
+            
+        except ChannelCategory.DoesNotExist:
+            logger.error(f"Category {category_id} not found during edit")
+            return self._create_error_response("Category not found")
+        except Exception as e:
+            logger.error(f"Error handling edit category submission: {str(e)}")
+            return self._create_error_response(f"Failed to update category: {str(e)}")
+    
+    def _get_channel_messages(self, channel_id: str, hours: int = 24) -> List[Dict]:
+        """
+        Get messages from a channel within the specified time range
+        
+        Args:
+            channel_id: Slack channel ID
+            hours: Number of hours to look back
+            
+        Returns:
+            List of message dictionaries
+        """
+        try:
+            # Calculate timestamp for specified hours ago
+            oldest = (datetime.now() - timedelta(hours=hours)).timestamp()
+            
+            messages = []
+            cursor = None
+            
+            while True:
+                response = self.client.conversations_history(
+                    channel=channel_id,
+                    oldest=str(oldest),
+                    limit=200,
+                    cursor=cursor
+                )
+                
+                messages.extend(response.get('messages', []))
+                
+                # Check if there are more messages
+                cursor = response.get('response_metadata', {}).get('next_cursor')
+                if not cursor:
+                    break
+            
+            # Filter out bot messages and system messages
+            filtered_messages = []
+            for message in messages:
+                if (message.get('type') == 'message' and 
+                    'bot_id' not in message and 
+                    'subtype' not in message):
+                    filtered_messages.append(message)
+            
+            return filtered_messages
+            
+        except SlackApiError as e:
+            logger.error(f"Error getting messages from channel {channel_id}: {e}")
+            return []
+
+    def show_help(self, user_id: str, channel_id: str) -> bool:
+        """
+        Show category management help
+        
+        Args:
+            user_id: User requesting help
+            channel_id: Channel to send the response to
+            
+        Returns:
+            True if successful
+        """
+        try:
+            help_message = f"""<@{user_id}> 📚 *Category Management Help*
+
+**Available Commands:**
+
+🆕 `/category create`
+   Create a new category with 2-5 channels
+
+📋 `/category list`
+   View all categories with management options
+
+❓ `/category help`
+   Show this help message
+
+**What are Categories?**
+Categories let you group related channels together for:
+• 📊 Cross-channel summaries and insights
+• 🔍 Better organization of your workspace
+• 📈 Team collaboration analysis
+
+**Category Features:**
+• ✅ Group 2-5 related channels
+• 📝 Add descriptions to explain the category
+• 📊 Generate AI summaries across all channels
+• ➕ Add or remove channels anytime
+• ✏️ Edit category details
+• 🗑️ Delete categories when no longer needed
+
+**Example Categories:**
+• *Development Team* - #dev-general, #code-review, #deployment
+• *Marketing* - #marketing-general, #campaigns, #social-media
+• *Support* - #customer-support, #bug-reports, #feature-requests
+
+💡 *Tip: Use categories to get insights into how different teams collaborate and what topics are trending across related channels!*"""
+
+            self._send_message(channel_id, help_message)
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error showing category help: {str(e)}")
+            return False
+
+    def handle_category_action(self, payload: Dict) -> bool:
+        """
+        Handle category action from overflow menu
+        
+        Args:
+            payload: Slack action payload
+            
+        Returns:
+            True if successful
+        """
+        try:
+            action = payload.get('actions', [{}])[0]
+            action_value = action.get('selected_option', {}).get('value', '')
+            user_id = payload.get('user', {}).get('id')
+            channel_id = payload.get('channel', {}).get('id')
+            trigger_id = payload.get('trigger_id')
+            
+            if not action_value or not user_id or not channel_id:
+                logger.warning(f"Missing required data in category action: {action_value}, {user_id}, {channel_id}")
+                return False
+            
+            # Parse action - handle both old and new format
+            action_parts = action_value.split('_')
+            if len(action_parts) < 2:
+                logger.error(f"Invalid action format: {action_value}")
+                return False
+            
+            # Handle different action formats
+            if action_parts[0] == 'summarize':
+                category_id = int(action_parts[1])
+                return self.generate_category_summary(category_id, user_id, channel_id)
+            elif action_parts[0] == 'add' and len(action_parts) >= 3 and action_parts[1] == 'channels':
+                category_id = int(action_parts[2])
+                return self.open_manage_channels_modal(trigger_id, user_id, category_id)
+            elif action_parts[0] == 'edit':
+                category_id = int(action_parts[1])
+                return self.open_edit_category_modal(trigger_id, user_id, category_id)
+            elif action_parts[0] == 'delete':
+                category_id = int(action_parts[1])
+                return self._delete_category(category_id, user_id, channel_id)
+            else:
+                logger.warning(f"Unknown action type: {action_value}")
+                return False
+            
+        except ValueError as e:
+            logger.error(f"Invalid category ID in action: {str(e)}")
+            return False
+        except Exception as e:
+            logger.error(f"Error handling category action: {str(e)}")
+            return False
+
+    def open_manage_channels_modal(self, trigger_id: str, user_id: str, category_id: int) -> bool:
+        """
+        Open modal for managing channels in a category (add/remove)
+        
+        Args:
+            trigger_id: Slack trigger ID for modal
+            user_id: User requesting the modal
+            category_id: ID of category to manage
+            
+        Returns:
+            True if modal opened successfully
+        """
+        try:
+            # Get the category
+            category = ChannelCategory.objects.get(id=category_id)
+            
+            # Get currently assigned channels
+            current_category_channels = CategoryChannel.objects.filter(category=category).select_related('channel')
+            current_channel_ids = set(cc.channel.channel_id for cc in current_category_channels)
+            
+            # Get all available channels
+            all_channels = self._get_available_channels()
+            
+            # Separate current channels and available channels
+            current_channels = []
+            available_channels = []
+            
+            for channel in all_channels:
+                if channel['id'] in current_channel_ids:
+                    current_channels.append(channel)
+                else:
+                    available_channels.append(channel)
+            
+            # Create options for channels to add
+            add_channel_options = []
+            for channel in available_channels:
+                add_channel_options.append({
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"#{channel['name']}"
+                    },
+                    "value": f"{channel['id']}|{channel['name']}"
+                })
+            
+            # Create options for channels to remove (must keep at least 2)
+            remove_channel_options = []
+            can_remove = len(current_channels) > 2
+            
+            if can_remove:
+                for channel in current_channels:
+                    remove_channel_options.append({
+                        "text": {
+                            "type": "plain_text",
+                            "text": f"#{channel['name']}"
+                        },
+                        "value": f"{channel['id']}|{channel['name']}"
+                    })
+            
+            # Limit options to Slack's 100 limit
+            if len(add_channel_options) > 100:
+                add_channel_options = add_channel_options[:100]
+            if len(remove_channel_options) > 100:
+                remove_channel_options = remove_channel_options[:100]
+            
+            # Calculate constraints
+            current_count = len(current_channels)
+            max_additional = min(5 - current_count, len(available_channels))
+            max_removable = max(0, current_count - 2)
+            
+            # Build modal blocks
+            modal_blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*Managing channels for: {category.name}*\n\n📊 Current: {current_count}/5 channels\n📋 Channels: {', '.join([f'#{ch.channel_name}' for ch in category.get_channels()])}"
+                    }
+                },
+                {
+                    "type": "divider"
+                }
+            ]
+            
+            # Add channels section
+            if add_channel_options and max_additional > 0:
+                modal_blocks.extend([
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*➕ Add Channels* (up to {max_additional} more)"
+                        }
+                    },
+                    {
+                        "type": "input",
+                        "block_id": "channels_to_add",
+                        "element": {
+                            "type": "multi_static_select",
+                            "action_id": "add_channels_select",
+                            "placeholder": {
+                                "type": "plain_text",
+                                "text": f"Select channels to add (max {max_additional})"
+                            },
+                            "options": add_channel_options
+                        },
+                        "label": {
+                            "type": "plain_text",
+                            "text": "Channels to Add"
+                        },
+                        "optional": True
+                    }
+                ])
+            elif current_count >= 5:
+                modal_blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "➕ *Cannot add more channels* - Category already has maximum of 5 channels"
+                    }
+                })
+            elif not add_channel_options:
+                modal_blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "➕ *No additional channels available* - All accessible channels are already in categories"
+                    }
+                })
+            
+            # Remove channels section
+            if remove_channel_options and can_remove:
+                modal_blocks.extend([
+                    {
+                        "type": "divider"
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*➖ Remove Channels* (can remove up to {max_removable})"
+                        }
+                    },
+                    {
+                        "type": "input",
+                        "block_id": "channels_to_remove",
+                        "element": {
+                            "type": "multi_static_select",
+                            "action_id": "remove_channels_select",
+                            "placeholder": {
+                                "type": "plain_text",
+                                "text": f"Select channels to remove (max {max_removable})"
+                            },
+                            "options": remove_channel_options
+                        },
+                        "label": {
+                            "type": "plain_text",
+                            "text": "Channels to Remove"
+                        },
+                        "optional": True
+                    }
+                ])
+            else:
+                modal_blocks.extend([
+                    {
+                        "type": "divider"
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "➖ *Cannot remove channels* - Categories must have at least 2 channels"
+                        }
+                    }
+                ])
+            
+            # Add info section
+            modal_blocks.extend([
+                {
+                    "type": "divider"
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "💡 *Rules:*\n• Categories must have 2-5 channels\n• Select channels to add, remove, or both\n• Changes will be applied when you click 'Save Changes'"
+                    }
+                }
+            ])
+            
+            modal_view = {
+                "type": "modal",
+                "callback_id": "manage_channels_modal",
+                "title": {
+                    "type": "plain_text",
+                    "text": "Manage Channels"
+                },
+                "submit": {
+                    "type": "plain_text",
+                    "text": "Save Changes"
+                },
+                "close": {
+                    "type": "plain_text",
+                    "text": "Cancel"
+                },
+                "blocks": modal_blocks,
+                "private_metadata": json.dumps({
+                    "user_id": user_id,
+                    "category_id": category_id,
+                    "current_count": current_count,
+                    "max_additional": max_additional,
+                    "max_removable": max_removable
+                })
+            }
+            
+            response = self.client.views_open(
+                trigger_id=trigger_id,
+                view=modal_view
+            )
+            
+            logger.info(f"Manage channels modal opened for category {category_id} by user {user_id}")
+            return True
+            
+        except ChannelCategory.DoesNotExist:
+            logger.error(f"Category {category_id} not found")
+            self._send_message_to_user(user_id, "❌ Category not found.")
+            return False
+        except SlackApiError as e:
+            logger.error(f"Error opening manage channels modal: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error opening manage channels modal: {str(e)}")
+            return False
+
+    def handle_manage_channels_submission(self, payload: Dict) -> Dict:
+        """
+        Handle manage channels modal submission (add/remove channels)
+        
+        Args:
+            payload: Slack modal submission payload
+            
+        Returns:
+            Response dictionary for Slack
+        """
+        try:
+            # Extract form data
+            values = payload.get('view', {}).get('state', {}).get('values', {})
+            private_metadata = json.loads(payload.get('view', {}).get('private_metadata', '{}'))
+            
+            user_id = private_metadata.get('user_id')
+            category_id = private_metadata.get('category_id')
+            current_count = private_metadata.get('current_count', 0)
+            max_additional = private_metadata.get('max_additional', 0)
+            max_removable = private_metadata.get('max_removable', 0)
+            
+            # Validate required data
+            if not all([user_id, category_id]):
+                return self._create_error_response("Missing required information")
+            
+            # Get selected channels to add and remove
+            channels_to_add = values.get('channels_to_add', {}).get('add_channels_select', {}).get('selected_options', [])
+            channels_to_remove = values.get('channels_to_remove', {}).get('remove_channels_select', {}).get('selected_options', [])
+            
+            # Validate that at least one action is selected
+            if not channels_to_add and not channels_to_remove:
+                return self._create_error_response("Please select channels to add or remove, or click Cancel")
+            
+            # Validate add constraints
+            if len(channels_to_add) > max_additional:
+                return self._create_error_response(f"You can only add {max_additional} more channels")
+            
+            # Validate remove constraints
+            if len(channels_to_remove) > max_removable:
+                return self._create_error_response(f"You can only remove {max_removable} channels")
+            
+            # Check final count constraint
+            final_count = current_count + len(channels_to_add) - len(channels_to_remove)
+            if final_count < 2:
+                return self._create_error_response("Categories must have at least 2 channels")
+            if final_count > 5:
+                return self._create_error_response("Categories cannot have more than 5 channels")
+            
+            # Get the category
+            category = ChannelCategory.objects.get(id=category_id)
+            workspace = category.workspace
+            
+            # Track results
+            channels_added = []
+            channels_removed = []
+            channels_failed = []
+            
+            # Process removals first
+            for channel_option in channels_to_remove:
+                try:
+                    channel_id, channel_name = channel_option['value'].split('|', 1)
+                    
+                    # Find and remove the CategoryChannel link
+                    slack_channel = SlackChannel.objects.get(workspace=workspace, channel_id=channel_id)
+                    category_channel = CategoryChannel.objects.filter(category=category, channel=slack_channel).first()
+                    
+                    if category_channel:
+                        category_channel.delete()
+                        channels_removed.append(f"#{channel_name}")
+                        logger.info(f"Removed channel {channel_name} from category {category.name}")
+                    else:
+                        channels_failed.append(f"#{channel_name} (not in category)")
+                        
+                except Exception as e:
+                    logger.error(f"Error removing channel: {str(e)}")
+                    channels_failed.append(f"#{channel_option.get('text', {}).get('text', 'unknown')} (remove error)")
+                    continue
+            
+            # Process additions
+            for channel_option in channels_to_add:
+                try:
+                    channel_id, channel_name = channel_option['value'].split('|', 1)
+                    
+                    # Get or create the channel
+                    slack_channel, created = SlackChannel.objects.get_or_create(
+                        workspace=workspace,
+                        channel_id=channel_id,
+                        defaults={
+                            'channel_name': channel_name,
+                            'is_private': False  # Will be updated if needed
+                        }
+                    )
+                    
+                    # Check if channel is already in this category
+                    if CategoryChannel.objects.filter(category=category, channel=slack_channel).exists():
+                        channels_failed.append(f"#{channel_name} (already in category)")
+                        continue
+                    
+                    # Create the link
+                    CategoryChannel.objects.create(
+                        category=category,
+                        channel=slack_channel,
+                        added_by_user=user_id
+                    )
+                    
+                    channels_added.append(f"#{channel_name}")
+                    logger.info(f"Added channel {channel_name} to category {category.name}")
+                    
+                except Exception as e:
+                    logger.error(f"Error adding channel: {str(e)}")
+                    channels_failed.append(f"#{channel_option.get('text', {}).get('text', 'unknown')} (add error)")
+                    continue
+            
+            # Build success message
+            success_parts = [f"✅ *Category '{category.name}' updated successfully!*\n"]
+            
+            if channels_added:
+                success_parts.append(f"➕ **Added** ({len(channels_added)}): {', '.join(channels_added)}")
+            
+            if channels_removed:
+                success_parts.append(f"➖ **Removed** ({len(channels_removed)}): {', '.join(channels_removed)}")
+            
+            if channels_failed:
+                success_parts.append(f"⚠️ **Failed**: {', '.join(channels_failed)}")
+            
+            # Add current status
+            updated_category = ChannelCategory.objects.get(id=category_id)  # Refresh from DB
+            current_channels = [f"#{ch.channel_name}" for ch in updated_category.get_channels()]
+            success_parts.append(f"\n📋 **Current channels** ({len(current_channels)}/5): {', '.join(current_channels)}")
+            
+            success_message = "\n".join(success_parts)
+            
+            logger.info(f"Manage channels completed for category {category_id} by user {user_id}. Added: {len(channels_added)}, Removed: {len(channels_removed)}, Failed: {len(channels_failed)}")
+            
+            # Send success notification
+            self._send_message_to_user(user_id, success_message)
+            
+            # Return proper modal close response
+            return {"response_action": "clear"}
+            
+        except ChannelCategory.DoesNotExist:
+            logger.error(f"Category {category_id} not found during manage channels")
+            return self._create_error_response("Category not found")
+        except Exception as e:
+            logger.error(f"Error handling manage channels submission: {str(e)}")
+            return self._create_error_response(f"Failed to manage channels: {str(e)}")
+
+    def _delete_category(self, category_id: int, user_id: str, channel_id: str) -> bool:
+        """Delete a category"""
+        try:
+            category = ChannelCategory.objects.get(id=category_id)
+            category_name = category.name
+            channels_count = category.get_channels_count()
+            
+            # Delete the category (this will cascade delete CategoryChannel entries)
+            category.delete()
+            
+            self._send_message(
+                channel_id,
+                f"<@{user_id}> ✅ Category '{category_name}' and its {channels_count} channel associations have been deleted successfully."
+            )
+            
+            logger.info(f"Category '{category_name}' (ID: {category_id}) deleted by user {user_id}")
+            return True
+            
+        except ChannelCategory.DoesNotExist:
+            self._send_message(
+                channel_id,
+                f"<@{user_id}> ❌ Category not found."
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Error deleting category: {str(e)}")
+            self._send_message(
+                channel_id,
+                f"<@{user_id}> ❌ Failed to delete category: {str(e)}"
+            )
+            return False
+
+    def _send_message_to_user(self, user_id: str, message: str):
+        """
+        Send a message to user via DM or fallback method
+        
+        Args:
+            user_id: User ID to send message to
+            message: Message text
+        """
+        try:
+            # Try to send a DM to the user first
+            try:
+                dm_response = self.client.conversations_open(users=user_id)
+                dm_channel_id = dm_response['channel']['id']
+                
+                self.client.chat_postMessage(
+                    channel=dm_channel_id,
+                    text=message,
+                    unfurl_links=False,
+                    unfurl_media=False
+                )
+                
+                logger.info(f"Message sent via DM to user {user_id}")
+                
+            except SlackApiError as dm_error:
+                logger.warning(f"Could not send DM to user {user_id}: {dm_error}")
+                # Could implement additional fallback methods here
+                
+        except Exception as e:
+            logger.error(f"Error sending message to user: {str(e)}")
