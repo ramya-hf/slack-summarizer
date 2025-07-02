@@ -14,44 +14,6 @@ from .slack import SlackBotHandler, verify_slack_signature
 logger = logging.getLogger(__name__)
 
 
-@csrf_exempt
-@require_http_methods(["POST"])
-def slack_event_handler(request):
-    """
-    Main handler for all Slack events and commands
-    
-    This endpoint handles:
-    - Slash commands
-    - Event subscriptions (messages, etc.)
-    - Interactive components (buttons, etc.)
-    """
-    try:
-        # Verify the request is from Slack
-        timestamp = request.META.get('HTTP_X_SLACK_REQUEST_TIMESTAMP', '')
-        signature = request.META.get('HTTP_X_SLACK_SIGNATURE', '')
-        
-        if not verify_slack_signature(request.body.decode(), timestamp, signature):
-            logger.warning("Invalid Slack signature")
-            return HttpResponse("Unauthorized", status=401)
-        
-        # Parse the request
-        content_type = request.META.get('CONTENT_TYPE', '')
-        
-        if 'application/x-www-form-urlencoded' in content_type:
-            # Slash command or interactive component
-            return handle_slash_command(request)
-        elif 'application/json' in content_type:
-            # Event subscription
-            return handle_event_subscription(request)
-        else:
-            logger.warning(f"Unsupported content type: {content_type}")
-            return HttpResponse("Unsupported content type", status=400)
-            
-    except Exception as e:
-        logger.error(f"Error in slack_event_handler: {str(e)}")
-        return HttpResponse("Internal server error", status=500)
-
-
 def handle_slash_command(request):
     """
     Handle Slack slash commands
@@ -92,6 +54,80 @@ def handle_slash_command(request):
             "response_type": "ephemeral",
             "text": "❌ An error occurred while processing your command. Please try again later."
         })
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def handle_interactive_component(request):
+    """
+    Handle Slack interactive components (modals, buttons, etc.)
+    
+    Args:
+        request: Django HTTP request containing form data
+        
+    Returns:
+        JsonResponse with Slack-formatted response
+    """
+    try:
+        # Verify the request is from Slack
+        timestamp = request.META.get('HTTP_X_SLACK_REQUEST_TIMESTAMP', '')
+        signature = request.META.get('HTTP_X_SLACK_SIGNATURE', '')
+        
+        if not verify_slack_signature(request.body.decode(), timestamp, signature):
+            logger.warning("Invalid Slack signature for interactive component")
+            return HttpResponse("Unauthorized", status=401)
+        
+        # Parse the payload
+        payload_str = request.POST.get('payload', '')
+        if not payload_str:
+            logger.error("No payload found in interactive component request")
+            return HttpResponse("Bad request", status=400)
+        
+        payload = json.loads(payload_str)
+        payload_type = payload.get('type')
+        
+        logger.info(f"Received interactive component: {payload_type}")
+        
+        # Initialize bot handler
+        bot_handler = SlackBotHandler()
+        
+        if payload_type == 'view_submission':
+            # Handle modal submissions
+            callback_id = payload.get('view', {}).get('callback_id')
+            
+            if callback_id == 'category_create_modal':
+                response = bot_handler.category_manager.handle_category_creation(payload)
+                return JsonResponse(response)
+            elif callback_id == 'manage_channels_modal':
+                response = bot_handler.category_manager.handle_manage_channels_submission(payload)
+                return JsonResponse(response)
+            elif callback_id == 'edit_category_modal':
+                response = bot_handler.category_manager.handle_edit_category_submission(payload)
+                return JsonResponse(response)
+        
+        elif payload_type == 'block_actions':
+            # Handle button clicks and other block actions
+            actions = payload.get('actions', [])
+            
+            for action in actions:
+                action_id = action.get('action_id', '')
+                
+                if action_id.startswith('category_actions_'):
+                    success = bot_handler.category_manager.handle_category_action(payload)
+                    if success:
+                        return JsonResponse({"text": "Action processed successfully"})
+                    else:
+                        return JsonResponse({"text": "Failed to process action"}, status=500)
+        
+        # Default response for unhandled interactive components
+        return JsonResponse({"text": "Component processed"})
+        
+    except json.JSONDecodeError:
+        logger.error("Invalid JSON in interactive component payload")
+        return HttpResponse("Bad request", status=400)
+    except Exception as e:
+        logger.error(f"Error handling interactive component: {str(e)}")
+        return HttpResponse("Internal server error", status=500)
 
 
 def handle_event_subscription(request):
@@ -140,6 +176,47 @@ def handle_event_subscription(request):
         return HttpResponse("Bad request", status=400)
     except Exception as e:
         logger.error(f"Error handling event subscription: {str(e)}")
+        return HttpResponse("Internal server error", status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def slack_event_handler(request):
+    """
+    Main handler for all Slack events and commands
+    
+    This endpoint handles:
+    - Slash commands
+    - Event subscriptions (messages, etc.)
+    - Interactive components (buttons, etc.)
+    """
+    try:
+        # Verify the request is from Slack
+        timestamp = request.META.get('HTTP_X_SLACK_REQUEST_TIMESTAMP', '')
+        signature = request.META.get('HTTP_X_SLACK_SIGNATURE', '')
+        
+        if not verify_slack_signature(request.body.decode(), timestamp, signature):
+            logger.warning("Invalid Slack signature")
+            return HttpResponse("Unauthorized", status=401)
+        
+        # Parse the request
+        content_type = request.META.get('CONTENT_TYPE', '')
+        
+        if 'application/x-www-form-urlencoded' in content_type:
+            # Check if it's an interactive component or slash command
+            if 'payload' in request.POST:
+                return handle_interactive_component(request)
+            else:
+                return handle_slash_command(request)
+        elif 'application/json' in content_type:
+            # Event subscription
+            return handle_event_subscription(request)
+        else:
+            logger.warning(f"Unsupported content type: {content_type}")
+            return HttpResponse("Unsupported content type", status=400)
+            
+    except Exception as e:
+        logger.error(f"Error in slack_event_handler: {str(e)}")
         return HttpResponse("Internal server error", status=500)
 
 
