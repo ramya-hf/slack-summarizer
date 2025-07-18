@@ -250,3 +250,201 @@ class CategorySummary(models.Model):
             'timeframe': self.timeframe,
             'created_at': self.created_at.strftime('%Y-%m-%d %H:%M')
         }
+
+
+class ChannelTodo(models.Model):
+    """Model to store todo items for channels"""
+    TASK_TYPES = [
+        ('bug', 'Bug Fix'),
+        ('feature', 'Feature Development'),
+        ('meeting', 'Meeting/Event'),
+        ('review', 'Code Review'),
+        ('deadline', 'Deadline/Due Date'),
+        ('general', 'General Task'),
+        ('urgent', 'Urgent Item'),
+    ]
+    
+    PRIORITY_LEVELS = [
+        ('low', 'Low'),
+        ('medium', 'Medium'),
+        ('high', 'High'),
+        ('critical', 'Critical'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('in_progress', 'In Progress'),
+        ('completed', 'Completed'),
+        ('cancelled', 'Cancelled'),
+    ]
+    
+    channel = models.ForeignKey(SlackChannel, on_delete=models.CASCADE)
+    title = models.CharField(max_length=500)
+    description = models.TextField(blank=True)
+    task_type = models.CharField(max_length=20, choices=TASK_TYPES, default='general')
+    priority = models.CharField(max_length=20, choices=PRIORITY_LEVELS, default='medium')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    assigned_to = models.CharField(max_length=100, blank=True, help_text="Slack user ID")
+    assigned_to_username = models.CharField(max_length=100, blank=True, help_text="Slack username for display")
+    due_date = models.DateTimeField(null=True, blank=True)
+    created_from_message = models.CharField(max_length=100, blank=True, help_text="Original message timestamp")
+    created_from_message_link = models.URLField(blank=True)
+    created_by = models.CharField(max_length=100)
+    created_by_username = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    completed_by = models.CharField(max_length=100, blank=True)
+    canvas_block_id = models.CharField(max_length=100, blank=True, help_text="Canvas block reference")
+    
+    class Meta:
+        ordering = ['-priority', '-created_at']
+        indexes = [
+            models.Index(fields=['channel', 'status']),
+            models.Index(fields=['channel', 'priority']),
+            models.Index(fields=['assigned_to', 'status']),
+            models.Index(fields=['due_date']),
+            models.Index(fields=['task_type', 'status']),
+        ]
+        verbose_name_plural = "Channel Todos"
+    
+    def __str__(self):
+        return f"[{self.get_priority_display()}] {self.title} - {self.channel.channel_name}"
+    
+    def is_overdue(self):
+        """Check if task is overdue"""
+        if self.due_date and self.status in ['pending', 'in_progress']:
+            return timezone.now() > self.due_date
+        return False
+    
+    def get_priority_emoji(self):
+        """Get emoji for priority level"""
+        priority_emojis = {
+            'critical': '🔴',
+            'high': '🟠', 
+            'medium': '🟡',
+            'low': '🟢',
+        }
+        return priority_emojis.get(self.priority, '⚪')
+    
+    def get_status_emoji(self):
+        """Get emoji for status"""
+        status_emojis = {
+            'pending': '⏳',
+            'in_progress': '🔄',
+            'completed': '✅',
+            'cancelled': '❌',
+        }
+        return status_emojis.get(self.status, '❓')
+    
+    def get_task_type_emoji(self):
+        """Get emoji for task type"""
+        type_emojis = {
+            'bug': '🐛',
+            'feature': '✨',
+            'meeting': '📅',
+            'review': '👀',
+            'deadline': '⏰',
+            'general': '📝',
+            'urgent': '🚨',
+        }
+        return type_emojis.get(self.task_type, '📝')
+    
+    def to_slack_format(self):
+        """Format todo for Slack display"""
+        assignee = f"@{self.assigned_to_username}" if self.assigned_to_username else "Unassigned"
+        due = f" | Due: {self.due_date.strftime('%m/%d %H:%M')}" if self.due_date else ""
+        
+        return f"{self.get_status_emoji()} {self.get_priority_emoji()} {self.get_task_type_emoji()} *{self.title}* - {assignee}{due}"
+
+
+class ChannelCanvas(models.Model):
+    """Model to track Canvas documents for channels"""
+    channel = models.OneToOneField(SlackChannel, on_delete=models.CASCADE)
+    canvas_id = models.CharField(max_length=100, unique=True)
+    canvas_url = models.URLField()
+    canvas_title = models.CharField(max_length=200, default="Todo List")
+    last_updated = models.DateTimeField(auto_now=True)
+    last_sync_at = models.DateTimeField(null=True, blank=True)
+    sync_errors = models.TextField(blank=True)
+    total_todos = models.IntegerField(default=0)
+    pending_todos = models.IntegerField(default=0)
+    
+    class Meta:
+        ordering = ['-last_updated']
+        verbose_name_plural = "Channel Canvas Documents"
+    
+    def __str__(self):
+        return f"Canvas for #{self.channel.channel_name} ({self.total_todos} todos)"
+    
+    def needs_sync(self):
+        """Check if canvas needs synchronization"""
+        if not self.last_sync_at:
+            return True
+        # Check if there are todos updated after last sync
+        return ChannelTodo.objects.filter(
+            channel=self.channel,
+            updated_at__gt=self.last_sync_at
+        ).exists()
+
+
+class TaskSummary(models.Model):
+    """Model to store task analysis summaries for channels"""
+    channel = models.ForeignKey(SlackChannel, on_delete=models.CASCADE)
+    summary_text = models.TextField()
+    total_tasks = models.IntegerField()
+    pending_tasks = models.IntegerField()
+    completed_tasks = models.IntegerField()
+    high_priority_tasks = models.IntegerField()
+    overdue_tasks = models.IntegerField()
+    timeframe = models.CharField(max_length=100, default="Last 24 hours")
+    timeframe_hours = models.IntegerField(default=24)
+    requested_by_user = models.CharField(max_length=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['channel', 'created_at']),
+            models.Index(fields=['requested_by_user']),
+        ]
+        verbose_name_plural = "Task Summaries"
+    
+    def __str__(self):
+        return f"Task Summary for #{self.channel.channel_name} at {self.created_at}"
+    
+    def get_task_stats(self):
+        """Get task statistics"""
+        return {
+            'total': self.total_tasks,
+            'pending': self.pending_tasks,
+            'completed': self.completed_tasks,
+            'high_priority': self.high_priority_tasks,
+            'overdue': self.overdue_tasks,
+            'completion_rate': round((self.completed_tasks / max(self.total_tasks, 1)) * 100, 1)
+        }
+
+
+class TaskReminder(models.Model):
+    """Model to store task reminders and notifications"""
+    todo = models.ForeignKey(ChannelTodo, on_delete=models.CASCADE)
+    reminder_type = models.CharField(max_length=50, choices=[
+        ('due_soon', 'Due Soon'),
+        ('overdue', 'Overdue'),
+        ('priority_escalation', 'Priority Escalation'),
+        ('assignment', 'New Assignment'),
+    ])
+    reminder_time = models.DateTimeField()
+    sent_at = models.DateTimeField(null=True, blank=True)
+    message_sent = models.TextField(blank=True)
+    is_sent = models.BooleanField(default=False)
+    
+    class Meta:
+        ordering = ['reminder_time']
+        indexes = [
+            models.Index(fields=['reminder_time', 'is_sent']),
+            models.Index(fields=['todo', 'reminder_type']),
+        ]
+    
+    def __str__(self):
+        return f"{self.get_reminder_type_display()} for {self.todo.title}"
