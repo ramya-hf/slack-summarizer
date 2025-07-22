@@ -251,7 +251,6 @@ class CategorySummary(models.Model):
             'created_at': self.created_at.strftime('%Y-%m-%d %H:%M')
         }
 
-
 class ChannelTodo(models.Model):
     """Model to store todo items for channels"""
     TASK_TYPES = [
@@ -295,25 +294,29 @@ class ChannelTodo(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     completed_at = models.DateTimeField(null=True, blank=True)
     completed_by = models.CharField(max_length=100, blank=True)
-    canvas_block_id = models.CharField(max_length=100, blank=True, help_text="Canvas block reference")
-    
+
     class Meta:
-        ordering = ['-priority', '-created_at']
+        ordering = ['-created_at']
         indexes = [
             models.Index(fields=['channel', 'status']),
-            models.Index(fields=['channel', 'priority']),
-            models.Index(fields=['assigned_to', 'status']),
+            models.Index(fields=['created_by']),
+            models.Index(fields=['assigned_to']),
             models.Index(fields=['due_date']),
-            models.Index(fields=['task_type', 'status']),
         ]
-        verbose_name_plural = "Channel Todos"
     
     def __str__(self):
-        return f"[{self.get_priority_display()}] {self.title} - {self.channel.channel_name}"
-    
-    def is_overdue(self):
-        """Check if task is overdue"""
-        if self.due_date and self.status in ['pending', 'in_progress']:
+        return f"{self.title} ({self.get_status_display()})"
+
+    def mark_completed(self, completed_by: str):
+        """Mark todo as completed"""
+        self.status = 'completed'
+        self.completed_at = timezone.now()
+        self.completed_by = completed_by
+        self.save()
+
+    def is_overdue(self) -> bool:
+        """Check if todo is overdue"""
+        if self.due_date and self.status != 'completed':
             return timezone.now() > self.due_date
         return False
     
@@ -356,36 +359,6 @@ class ChannelTodo(models.Model):
         due = f" | Due: {self.due_date.strftime('%m/%d %H:%M')}" if self.due_date else ""
         
         return f"{self.get_status_emoji()} {self.get_priority_emoji()} {self.get_task_type_emoji()} *{self.title}* - {assignee}{due}"
-
-
-class ChannelCanvas(models.Model):
-    """Model to track Canvas documents for channels"""
-    channel = models.OneToOneField(SlackChannel, on_delete=models.CASCADE)
-    canvas_id = models.CharField(max_length=100, unique=True)
-    canvas_url = models.URLField()
-    canvas_title = models.CharField(max_length=200, default="Todo List")
-    last_updated = models.DateTimeField(auto_now=True)
-    last_sync_at = models.DateTimeField(null=True, blank=True)
-    sync_errors = models.TextField(blank=True)
-    total_todos = models.IntegerField(default=0)
-    pending_todos = models.IntegerField(default=0)
-    
-    class Meta:
-        ordering = ['-last_updated']
-        verbose_name_plural = "Channel Canvas Documents"
-    
-    def __str__(self):
-        return f"Canvas for #{self.channel.channel_name} ({self.total_todos} todos)"
-    
-    def needs_sync(self):
-        """Check if canvas needs synchronization"""
-        if not self.last_sync_at:
-            return True
-        # Check if there are todos updated after last sync
-        return ChannelTodo.objects.filter(
-            channel=self.channel,
-            updated_at__gt=self.last_sync_at
-        ).exists()
 
 
 class TaskSummary(models.Model):
@@ -448,3 +421,4 @@ class TaskReminder(models.Model):
     
     def __str__(self):
         return f"{self.get_reminder_type_display()} for {self.todo.title}"
+
