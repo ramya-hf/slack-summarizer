@@ -18,7 +18,7 @@ from django.utils import timezone
 from .models import (
     SlackWorkspace, SlackChannel, ChannelSummary, 
     ConversationContext, BotCommand, ChatbotInteraction,
-    ChannelTodo, TaskSummary, ChannelCanvas
+    ChannelTodo, TaskSummary
 )
 from .summarizer import (
     ChannelSummarizer, filter_messages_by_timeframe, extract_channel_name_from_command, 
@@ -28,7 +28,6 @@ from .summarizer import (
 from .intent_classifier import IntentClassifier, ChatbotResponder
 from .category_manager import CategoryManager
 from .todo_manager import TodoManager
-from .canvas_manager import CanvasManager
 from .task_detector import TaskDetector
 
 logger = logging.getLogger(__name__)
@@ -50,7 +49,6 @@ class SlackBotHandler:
         self.responder = ChatbotResponder()
         self.category_manager = CategoryManager(self.client)
         self.todo_manager = TodoManager(self.client)
-        self.canvas_manager = CanvasManager(self.client)
         self.task_detector = TaskDetector()
         self.bot_user_id = None
         self._initialize_bot_info()
@@ -102,8 +100,7 @@ class SlackBotHandler:
                 return self._handle_tasks_command(payload, bot_command)
             elif command == '/task':
                 return self._handle_task_command(payload, bot_command)
-            elif command == '/canvas':
-                return self._handle_canvas_command(payload, bot_command)
+
             elif command == '/config':
                 return self._handle_config_command(payload, bot_command)
             else:
@@ -222,7 +219,7 @@ class SlackBotHandler:
             )
             
             return {"response_type": "ephemeral", "text": ""}
-
+    
     def _process_category_summary_request(self, category_name: str, response_channel_id: str, user_id: str, bot_command: BotCommand):
         """
         Process summary request for a specific category
@@ -337,7 +334,7 @@ class SlackBotHandler:
                 response_channel_id,
                 f"❌ Failed to generate category summary for `{category_name}`. Error: {str(e)}"
             )
-
+    
     def _process_channel_summary(self, channel_name: str, response_channel_id: str, user_id: str, bot_command: BotCommand):
         """
         Process summary for a specific channel
@@ -434,7 +431,7 @@ class SlackBotHandler:
                 response_channel_id,
                 f"❌ Failed to generate summary for `#{channel_name}`. Error: {str(e)}"
             )
-
+    
     def _process_current_channel_summary(self, channel_id: str, user_id: str, bot_command: BotCommand):
         """
         Process summary for the current channel
@@ -519,7 +516,7 @@ class SlackBotHandler:
                 channel_id,
                 f"❌ Failed to generate summary. Error: {str(e)}"
             )
-
+    
     def _handle_category_command(self, payload: Dict, bot_command: BotCommand) -> Dict:
         """
         Handle the /category command and its subcommands
@@ -626,7 +623,7 @@ class SlackBotHandler:
                     "response_type": "ephemeral",
                     "text": f"❓ Unknown subcommand `{text}`. Use `/category help` to see available commands."
                 }
-                
+            
         except Exception as e:
             logger.error(f"Error in category command: {str(e)}")
             bot_command.status = 'failed'
@@ -836,7 +833,7 @@ class SlackBotHandler:
             formatted_message = f"<@{user_id}> Here's your requested summary:\n\n```\n{summary}\n```\n\n💬 *Ask me any follow-up questions about this summary!*"
             
             self.client.chat_postMessage(
-                channel=channel_id,
+                    channel=channel_id,
                 text=formatted_message,
                 unfurl_links=False,
                 unfurl_media=False
@@ -1005,7 +1002,7 @@ class SlackBotHandler:
                 channel_id,
                 f"❌ Failed to generate latest thread summary for `#{target}`. Error: {str(e)}"
             )
-
+    
     def _process_current_channel_latest_thread_summary(self, channel_id: str, user_id: str, bot_command: BotCommand):
         """
         Process summary for the latest thread in the current channel
@@ -1107,7 +1104,7 @@ class SlackBotHandler:
                 channel_id,
                 f"❌ Failed to generate latest thread summary. Error: {str(e)}"
             )
-
+    
     def _process_specific_thread_summary(self, target: str, message_ts: str, channel_id: str, user_id: str, bot_command: BotCommand):
         """
         Process summary for a specific thread identified by message link
@@ -1224,7 +1221,7 @@ class SlackBotHandler:
                 channel_id,
                 f"❌ Failed to generate thread summary. Error: {str(e)}"
             )
-
+    
     def _get_latest_thread_timestamp(self, channel_id: str) -> Optional[str]:
         """
         Find the most recent message that has thread replies in a channel
@@ -1256,7 +1253,7 @@ class SlackBotHandler:
         except SlackApiError as e:
             logger.error(f"Error finding latest thread in channel {channel_id}: {e}")
             return None
-
+    
     def _get_thread_messages(self, channel_id: str, thread_ts: str) -> List[Dict]:
         """
         Get all messages in a thread
@@ -1289,7 +1286,7 @@ class SlackBotHandler:
         except SlackApiError as e:
             logger.error(f"Error getting thread messages for {thread_ts} in channel {channel_id}: {e}")
             return []
-
+    
     def _message_has_replies(self, channel_id: str, message_ts: str) -> bool:
         """
         Check if a message has thread replies
@@ -1314,7 +1311,7 @@ class SlackBotHandler:
         except SlackApiError as e:
             logger.error(f"Error checking thread replies for {message_ts} in channel {channel_id}: {e}")
             return False
-
+    
     def _send_thread_summary_message(self, channel_id: str, summary: str, user_id: str, channel_context: str, thread_type: str):
         """Send the thread summary message to the channel"""
         try:
@@ -1329,10 +1326,11 @@ class SlackBotHandler:
             )
         except SlackApiError as e:
             logger.error(f"Failed to send thread summary message: {e}")
-
+    
     def _handle_todo_command(self, payload: Dict, bot_command: BotCommand) -> Dict:
         """
-        Handle the /todo command and its subcommands
+        Handle the /todo command - DM-ONLY personal task scanner
+        Creates/updates a personal Canvas with tasks from ALL workspace channels and DMs
         
         Args:
             payload: Slack slash command payload
@@ -1341,52 +1339,30 @@ class SlackBotHandler:
         Returns:
             Response dictionary for Slack
         """
-        text = payload.get('text', '').strip()
         user_id = payload.get('user_id')
         channel_id = payload.get('channel_id')
         
-        logger.info(f"Processing todo command with text: '{text}'")
+        logger.info(f"Todo command received: user={user_id}, channel={channel_id}")
         
-        try:
-            # Parse command and subcommand
-            parts = text.split() if text else []
-            
-            if not parts:
-                # Show help if no subcommand
-                return self._todo_show_help(bot_command)
-            
-            subcommand = parts[0].lower()
-            
-            if subcommand == 'add':
-                return self._todo_add(parts[1:], user_id, channel_id, bot_command)
-            elif subcommand == 'list':
-                return self._todo_list(parts[1:], user_id, channel_id, bot_command)
-            elif subcommand == 'complete':
-                return self._todo_complete(parts[1:], user_id, channel_id, bot_command)
-            elif subcommand == 'edit':
-                return self._todo_edit(parts[1:], user_id, channel_id, bot_command)
-            elif subcommand == 'assign':
-                return self._todo_assign(parts[1:], user_id, channel_id, bot_command)
-            elif subcommand == 'priority':
-                return self._todo_priority(parts[1:], user_id, channel_id, bot_command)
-            elif subcommand == 'delete':
-                return self._todo_delete(parts[1:], user_id, channel_id, bot_command)
-            elif subcommand == 'help':
-                return self._todo_show_help(bot_command)
-            else:
-                # Try to add as a direct todo item
-                return self._todo_add_direct(text, user_id, channel_id, bot_command)
-                
-        except Exception as e:
-            logger.error(f"Error in todo command: {str(e)}")
+        # Check if this is being used in a DM with the bot
+        is_personal_dm = self._is_personal_dm(channel_id, user_id)
+        
+        if not is_personal_dm:
+            # Not in DM - show error message
             bot_command.status = 'failed'
-            bot_command.error_message = str(e)
+            bot_command.error_message = 'Command only works in DM'
             bot_command.save()
             
             return {
                 "response_type": "ephemeral",
-                "text": "❌ An error occurred while processing your todo command. Please try again later."
+                "text": "🚫 The `/todo` command only works in your **DM with the bot**.\n\n" +
+                       "📱 Open a DM with this bot and try `/todo` again to see your personal task dashboard.\n\n" +
+                       "💡 Tip: The `/todo` command scans ALL your workspace channels and DMs to create a unified task list!"
             }
+        
+        # DM mode - run personal task scanner
+        logger.info(f"Running personal task scanner for user {user_id} in DM")
+        return self._handle_personal_task_command(payload, bot_command)
 
     def _handle_tasks_command(self, payload: Dict, bot_command: BotCommand) -> Dict:
         """
@@ -1451,14 +1427,20 @@ class SlackBotHandler:
         user_id = payload.get('user_id')
         channel_id = payload.get('channel_id')
         
+        logger.info(f"Task command received: user={user_id}, channel={channel_id}, text='{text}'")
+        
         # Check if this is a DM with the bot (personal mode)
         is_personal_dm = self._is_personal_dm(channel_id, user_id)
         
+        logger.info(f"DM detection result: is_personal_dm={is_personal_dm} for channel {channel_id}")
+        
         if is_personal_dm:
             # Personal productivity mode - scan entire workspace
+            logger.info(f"Routing to personal task command for user {user_id}")
             return self._handle_personal_task_command(payload, bot_command)
         else:
             # Channel mode - process channel messages to channel canvas
+            logger.info(f"Routing to channel task command for channel {channel_id}")
             return self._handle_channel_task_command(payload, bot_command, text)
 
     def _is_personal_dm(self, channel_id: str, user_id: str) -> bool:
@@ -1473,19 +1455,33 @@ class SlackBotHandler:
             True if this is a personal DM with the bot
         """
         try:
-            # Get channel info to determine if it's a DM
-            response = self.client.conversations_info(channel=channel_id)
-            if response['ok']:
-                channel_info = response['channel']
-                # Check if it's a DM (IM) and only has the user and bot
-                if (channel_info.get('is_im', False) or 
-                    channel_info.get('is_mpim', False)):
-                    return True
+            logger.info(f"Checking if channel {channel_id} is personal DM for user {user_id}")
+            
+            # Simple check: DM channel IDs start with 'D', group DMs with 'G', channels with 'C'
+            if channel_id.startswith('D'):
+                logger.info(f"Channel {channel_id} is a DM based on ID format")
+                return True
+            elif channel_id.startswith('G'):
+                # Could be a group DM - check with conversations.info if needed
+                try:
+                    response = self.client.conversations_info(channel=channel_id)
+                    if response['ok']:
+                        channel_info = response['channel']
+                        is_group_dm = channel_info.get('is_mpim', False)
+                        logger.info(f"Channel {channel_id} is group DM: {is_group_dm}")
+                        return is_group_dm
+                except SlackApiError as api_error:
+                    logger.warning(f"Could not get info for channel {channel_id}: {api_error}")
+                    # If we can't get info, assume it's not a DM for safety
+                    return False
+            
+            logger.info(f"Channel {channel_id} is not a DM (starts with {channel_id[0] if channel_id else 'None'})")
             return False
+            
         except Exception as e:
             logger.error(f"Error checking if personal DM: {str(e)}")
-            return False
-
+        return False
+    
     def _handle_personal_task_command(self, payload: Dict, bot_command: BotCommand) -> Dict:
         """
         Handle /task command in personal DM - scans ALL channels and DMs for tasks
@@ -1503,11 +1499,43 @@ class SlackBotHandler:
         logger.info(f"Processing PERSONAL /task command for user {user_id}")
         
         try:
-            # Send immediate response
-            self.client.chat_postMessage(
-                channel=dm_channel_id,
-                text=f"🤖 **Personal Task Analysis Starting...**\n\n🔍 Scanning your entire workspace:\n• All channels you're in\n• All DM conversations\n• All actionable messages\n\n⏳ This may take a moment..."
-            )
+            # First, ensure we can actually message the user
+            logger.info(f"Starting personal task analysis for user {user_id} in DM {dm_channel_id}")
+            
+            try:
+                # Send immediate response
+                self.client.chat_postMessage(
+                    channel=dm_channel_id,
+                    text=f"🤖 **Personal Task Analysis Starting...**\n\n🔍 Scanning your entire workspace:\n• All channels you're in\n• All DM conversations\n• All actionable messages\n\n⏳ This may take a moment..."
+                )
+                logger.info(f"Successfully sent initial message to DM {dm_channel_id}")
+            except SlackApiError as msg_error:
+                logger.error(f"Failed to send message to DM {dm_channel_id}: {msg_error}")
+                
+                # If we can't send to the DM, try to open a conversation first
+                try:
+                    dm_response = self.client.conversations_open(users=user_id)
+                    if dm_response['ok']:
+                        dm_channel_id = dm_response['channel']['id']
+                        logger.info(f"Opened new DM conversation: {dm_channel_id}")
+                        
+                        # Try sending the message again
+                        self.client.chat_postMessage(
+                            channel=dm_channel_id,
+                            text=f"🤖 **Personal Task Analysis Starting...**\n\n🔍 Scanning your entire workspace:\n• All channels you're in\n• All DM conversations\n• All actionable messages\n\n⏳ This may take a moment..."
+                        )
+                    else:
+                        raise SlackApiError(f"Could not open DM: {dm_response.get('error', 'Unknown error')}")
+                except SlackApiError as dm_error:
+                    logger.error(f"Could not open DM with user {user_id}: {dm_error}")
+                    bot_command.status = 'failed'
+                    bot_command.error_message = f"Cannot access DM with user: {str(dm_error)}"
+                    bot_command.save()
+                    
+                    return {
+                        "response_type": "ephemeral",
+                        "text": f"❌ **Cannot start personal task analysis**\n\nI need to be able to send you direct messages. Please:\n1. Start a DM with me first by clicking my name\n2. Send me any message to open the conversation\n3. Then try `/task` again"
+                    }
             
             # Get all channels the user is in
             user_channels = self._get_user_channels(user_id)
@@ -1552,7 +1580,12 @@ class SlackBotHandler:
             all_tasks = all_channel_tasks + all_dm_tasks
             deduplicated_tasks = self._deduplicate_tasks(all_tasks)
             
-            # Create personal Canvas in the DM
+            # Create personal List in the DM
+            list_success, list_message = self._create_personal_list(
+                dm_channel_id, user_id, deduplicated_tasks
+            )
+            
+            # Create/update personal Canvas
             canvas_success, canvas_message = self._create_personal_canvas(
                 dm_channel_id, user_id, deduplicated_tasks
             )
@@ -1569,18 +1602,25 @@ class SlackBotHandler:
             result_message += f"• {len(deduplicated_tasks)} unique tasks after deduplication\n"
             result_message += f"• {todos_created} todos created in your personal system\n\n"
             
-            if canvas_success:
-                result_message += f"🎨 **Personal Canvas Created:**\n"
+            if list_success:
+                result_message += f"✅ **Interactive Task List Created:**\n"
                 result_message += f"Your master todo list is now available in this DM!\n"
-                result_message += f"Canvas contains all tasks organized by priority and source.\n\n"
+                result_message += f"Click the checkboxes above to mark tasks complete.\n\n"
+            else:
+                result_message += f"⚠️ **Task List Status:** {list_message}\n\n"
+            
+            if canvas_success:
+                result_message += f"🎨 **Personal Canvas Updated:**\n"
+                result_message += f"{canvas_message}\n"
+                result_message += f"Your 'To-do list' Canvas tab has been updated with all tasks!\n\n"
             else:
                 result_message += f"⚠️ **Canvas Status:** {canvas_message}\n\n"
             
             result_message += f"🔄 **Next Steps:**\n"
-            result_message += f"• Use `/todo list` to see all your personal todos\n"
-            result_message += f"• Use `/todo complete [id]` to mark tasks done\n"
-            result_message += f"• Run `/task` again anytime to refresh from latest messages\n"
-            result_message += f"• Your personal Canvas automatically updates when you manage todos"
+            result_message += f"• Click checkboxes in the task list above to mark items complete\n"
+            result_message += f"• Check your 'To-do list' Canvas tab for visual task board\n"
+            result_message += f"• Use `/todo list` to see all your personal todos in database\n"
+            result_message += f"• Run `/todo` again anytime to refresh with latest messages"
             
             self.client.chat_postMessage(
                 channel=dm_channel_id,
@@ -1600,17 +1640,27 @@ class SlackBotHandler:
             bot_command.error_message = str(e)
             bot_command.save()
             
+            # Provide detailed error message based on the error type
+            if "channel_not_found" in str(e).lower():
+                error_message = "❌ **Cannot Access DM Conversation**\n\n**Solution:**\n1. Start a DM with me by clicking my name\n2. Send me any message to open the conversation\n3. Then try `/task` again\n\n**Or add missing OAuth scopes:** `conversations:read`, `conversations:history`"
+            elif "missing_scope" in str(e).lower():
+                error_message = "❌ **Missing OAuth Permissions**\n\nYour Slack app needs additional scopes:\n• `conversations:read`\n• `conversations:history` \n• `canvases:read`\n• `canvases:write`\n\nAdd these in your Slack app settings and reinstall."
+            elif "not_authed" in str(e).lower():
+                error_message = "❌ **Authentication Error**\n\nBot token may be invalid. Check your `SLACK_BOT_TOKEN` in settings."
+            else:
+                error_message = f"❌ **Error in Personal Task Analysis:**\n{str(e)}\n\nCheck server logs for details or contact support."
+            
             try:
                 self.client.chat_postMessage(
                     channel=dm_channel_id,
-                    text=f"❌ **Error in Personal Task Analysis:**\n{str(e)}\n\nPlease try again or contact support."
+                    text=error_message
                 )
-            except:
-                pass
+            except Exception as msg_error:
+                logger.error(f"Could not send error message to DM: {msg_error}")
             
             return {
                 "response_type": "ephemeral",
-                "text": "❌ An error occurred during personal task analysis. Please try again later."
+                "text": error_message
             }
 
     def _handle_channel_task_command(self, payload: Dict, bot_command: BotCommand, text: str) -> Dict:
@@ -1756,7 +1806,7 @@ class SlackBotHandler:
                             )
                             
                             todos_created += 1
-                        
+                    
                     except Exception as e:
                         logger.error(f"Error processing message: {str(e)}")
                         continue
@@ -1889,51 +1939,7 @@ class SlackBotHandler:
             logger.error(f"Error ensuring Canvas exists: {str(e)}")
             return False, f"❌ Error with canvas: {str(e)}"
 
-    def _handle_canvas_command(self, payload: Dict, bot_command: BotCommand) -> Dict:
-        """
-        Handle the /canvas command for Canvas integration
-        
-        Args:
-            payload: Slack slash command payload
-            bot_command: BotCommand database record
-            
-        Returns:
-            Response dictionary for Slack
-        """
-        text = payload.get('text', '').strip()
-        user_id = payload.get('user_id')
-        channel_id = payload.get('channel_id')
-        
-        logger.info(f"Processing canvas command with text: '{text}'")
-        
-        try:
-            parts = text.split() if text else ['show']
-            subcommand = parts[0].lower()
-            
-            if subcommand == 'create':
-                return self._canvas_create(parts[1:], user_id, channel_id, bot_command)
-            elif subcommand == 'update':
-                return self._canvas_update(user_id, channel_id, bot_command)
-            elif subcommand == 'show':
-                return self._canvas_show(user_id, channel_id, bot_command)
-            elif subcommand == 'delete':
-                return self._canvas_delete(user_id, channel_id, bot_command)
-            elif subcommand == 'help':
-                return self._canvas_show_help(bot_command)
-            else:
-                # Default to show
-                return self._canvas_show(user_id, channel_id, bot_command)
-                
-        except Exception as e:
-            logger.error(f"Error in canvas command: {str(e)}")
-            bot_command.status = 'failed'
-            bot_command.error_message = str(e)
-            bot_command.save()
-            
-            return {
-                "response_type": "ephemeral",
-                "text": "❌ An error occurred while processing your canvas command. Please try again later."
-            }
+
 
     def _handle_config_command(self, payload: Dict, bot_command: BotCommand) -> Dict:
         """
@@ -2175,7 +2181,7 @@ class SlackBotHandler:
             title = description
         
         success, message, todo = self.todo_manager.add_todo(
-            channel_id=channel_id,
+                channel_id=channel_id,
             title=title,
             description=description,
             task_type=task_type,
@@ -2273,7 +2279,7 @@ class SlackBotHandler:
         
         identifier = " ".join(args).strip('"')
         success, message, todo = self.todo_manager.complete_todo(
-            channel_id=channel_id,
+                channel_id=channel_id,
             todo_identifier=identifier,
             completed_by=user_id
         )
@@ -2501,7 +2507,7 @@ class SlackBotHandler:
                     "response_type": "ephemeral",
                     "text": "❌ Could not access channel messages"
                 }
-                
+            
         except Exception as e:
             logger.error(f"Error extracting tasks: {str(e)}")
             return {
@@ -2576,98 +2582,7 @@ The Tasks command uses AI to analyze your channel messages and:
         }
 
      # Canvas command helpers
-    def _canvas_create(self, args: List[str], user_id: str, channel_id: str, bot_command: BotCommand) -> Dict:
-        """Create a new canvas"""
-        title = " ".join(args) if args else "Todo List"
-        
-        success, message, canvas = self.canvas_manager.create_canvas(
-            channel_id=channel_id,
-            title=title,
-            created_by=user_id
-        )
-        
-        bot_command.status = 'completed' if success else 'failed'
-        if not success:
-            bot_command.error_message = message
-        bot_command.save()
-        
-        return {
-            "response_type": "in_channel" if success else "ephemeral",
-            "text": f"<@{user_id}> {message}"
-        }
 
-    def _canvas_update(self, user_id: str, channel_id: str, bot_command: BotCommand) -> Dict:
-        """Update canvas with current todos"""
-        success, message = self.canvas_manager.update_canvas(channel_id, force_sync=True)
-        
-        bot_command.status = 'completed' if success else 'failed'
-        if not success:
-            bot_command.error_message = message
-        bot_command.save()
-        
-        return {
-            "response_type": "ephemeral",
-            "text": f"<@{user_id}> {message}"
-        }
-
-    def _canvas_show(self, user_id: str, channel_id: str, bot_command: BotCommand) -> Dict:
-        """Show canvas information"""
-        success, message = self.canvas_manager.show_canvas_info(channel_id)
-        
-        bot_command.status = 'completed'
-        bot_command.save()
-        
-        return {
-            "response_type": "ephemeral",
-            "text": f"<@{user_id}> {message}"
-        }
-
-    def _canvas_show_help(self, bot_command: BotCommand) -> Dict:
-        """Show canvas command help"""
-        bot_command.status = 'completed'
-        bot_command.save()
-        
-        help_text = """🎨 **Canvas Management Commands**
-
-**Commands:**
-• `/canvas create [title]` - Create a new Canvas todo list
-• `/canvas update` - Sync current todos to Canvas
-• `/canvas show` - Show Canvas info and link
-• `/canvas delete` - Delete Canvas document
-• `/canvas help` - Show this help
-
-**What is Canvas?**
-Canvas creates a beautiful visual todo list that you can share with your team. It automatically syncs with your bot todos and provides:
-• Visual project tracking
-• Team collaboration
-• Progress visualization
-• Priority-based organization
-
-**Examples:**
-• `/canvas create "Sprint 1 Tasks"` - Create Canvas with custom title
-• `/canvas update` - Force sync latest todos to Canvas
-• `/canvas show` - Get Canvas link and statistics
-
-💡 Canvas automatically updates when you add, complete, or edit todos!"""
-        
-        return {
-            "response_type": "ephemeral",
-            "text": help_text
-        }
-
-    def _canvas_delete(self, user_id: str, channel_id: str, bot_command: BotCommand) -> Dict:
-        """Delete canvas for channel"""
-        success, message = self.canvas_manager.delete_canvas(channel_id)
-        
-        bot_command.status = 'completed' if success else 'failed'
-        if not success:
-            bot_command.error_message = message
-        bot_command.save()
-        
-        return {
-            "response_type": "ephemeral",
-            "text": f"<@{user_id}> {message}"
-        }
 
     # Auto-task detection helper methods
     def _is_auto_task_detection_enabled(self, channel_id: str) -> bool:
@@ -2891,7 +2806,7 @@ Canvas creates a beautiful visual todo list that you can share with your team. I
         except Exception as e:
             logger.error(f"Error getting user channels: {str(e)}")
             return []
-
+    
     def _get_user_dms(self, user_id: str) -> List[Dict]:
         """
         Get all DM conversations for the user
@@ -2920,8 +2835,8 @@ Canvas creates a beautiful visual todo list that you can share with your team. I
                     filtered_dms = [dm for dm in dms if dm.get('user') != self.bot_user_id]
                     user_dms.extend(filtered_dms)
                     
-                    cursor = response.get('response_metadata', {}).get('next_cursor')
-                    if not cursor:
+                cursor = response.get('response_metadata', {}).get('next_cursor')
+                if not cursor:
                         break
                 else:
                     logger.error(f"Failed to get user DMs: {response.get('error', 'Unknown error')}")
@@ -2946,16 +2861,17 @@ Canvas creates a beautiful visual todo list that you can share with your team. I
             List of task dictionaries
         """
         try:
-            # Get recent messages from channel (last 50 to avoid overwhelming)
-            response = self.client.conversations_history(
+            # Get recent messages from channel (last 100 for better coverage)
+            response = self._safe_api_call(
+                self.client.conversations_history,
                 channel=channel_id,
-                limit=50
+                limit=100
             )
             
             if not response['ok']:
                 logger.warning(f"Could not access channel {channel_id}: {response.get('error', 'Unknown error')}")
-                return []
-            
+            return []
+    
             messages = response['messages']
             channel_name = self._get_channel_name(channel_id)
             extracted_tasks = []
@@ -2966,22 +2882,33 @@ Canvas creates a beautiful visual todo list that you can share with your team. I
                     msg.get('user') != self.bot_user_id and 
                     not msg.get('subtype') and
                     msg.get('text', '').strip() and
-                    len(msg.get('text', '').strip()) >= 15):  # Slightly higher threshold for personal analysis
+                    len(msg.get('text', '').strip()) >= 8):  # Lower threshold to catch more tasks
                     
                     message_text = msg.get('text', '')
                     msg_user_id = msg.get('user', '')
                     timestamp = msg.get('ts', '')
                     
-                    # Use AI to detect actionable content
-                    detected_task = self.task_detector.analyze_message(
-                        message=message_text,
-                        channel_name=channel_name,
-                        user_id=msg_user_id,
-                        timestamp=timestamp
-                    )
+                    # Use AI to detect actionable content (with fallback for quota exceeded)
+                    detected_task = None
+                    try:
+                        detected_task = self.task_detector.analyze_message(
+                            message=message_text,
+                            channel_name=channel_name,
+                            user_id=msg_user_id,
+                            timestamp=timestamp
+                        )
+                    except Exception as ai_error:
+                        if "429" in str(ai_error) or "quota" in str(ai_error).lower():
+                            logger.warning(f"AI quota exceeded, using keyword fallback for: {message_text[:50]}")
+                            # Simple keyword-based fallback when AI quota is exceeded
+                            detected_task = self._simple_task_detection_fallback(message_text, channel_name)
+                        else:
+                            logger.error(f"AI analysis error: {ai_error}")
+                            # Try fallback on any AI error
+                            detected_task = self._simple_task_detection_fallback(message_text, channel_name)
                     
-                    # Only include tasks with reasonable confidence for personal analysis
-                    if detected_task and detected_task.confidence_score >= 0.6:
+                    # Only include tasks with reasonable confidence for personal analysis (lowered for better coverage)
+                    if detected_task and detected_task.confidence_score >= 0.4:
                         task_dict = {
                             'title': detected_task.title,
                             'description': f"From #{channel_name}: {message_text[:150]}",
@@ -2998,7 +2925,7 @@ Canvas creates a beautiful visual todo list that you can share with your team. I
                         }
                         extracted_tasks.append(task_dict)
             
-            logger.info(f"Extracted {len(extracted_tasks)} tasks from channel {channel_name}")
+            logger.info(f"Extracted {len(extracted_tasks)} tasks from channel {channel_name} (scanned {len(messages)} messages)")
             return extracted_tasks
             
         except Exception as e:
@@ -3017,10 +2944,11 @@ Canvas creates a beautiful visual todo list that you can share with your team. I
             List of task dictionaries
         """
         try:
-            # Get recent messages from DM (last 30 to avoid overwhelming)
-            response = self.client.conversations_history(
+            # Get recent messages from DM (last 60 for better coverage)
+            response = self._safe_api_call(
+                self.client.conversations_history,
                 channel=dm_id,
-                limit=30
+                limit=60
             )
             
             if not response['ok']:
@@ -3044,13 +2972,22 @@ Canvas creates a beautiful visual todo list that you can share with your team. I
                     msg_user_id = msg.get('user', '')
                     timestamp = msg.get('ts', '')
                     
-                    # Use AI to detect actionable content
-                    detected_task = self.task_detector.analyze_message(
-                        message=message_text,
-                        channel_name=f"DM with {dm_partner_name}",
-                        user_id=msg_user_id,
-                        timestamp=timestamp
-                    )
+                    # Use AI to detect actionable content (with fallback for quota exceeded)
+                    detected_task = None
+                    try:
+                        detected_task = self.task_detector.analyze_message(
+                            message=message_text,
+                            channel_name=f"DM with {dm_partner_name}",
+                            user_id=msg_user_id,
+                            timestamp=timestamp
+                        )
+                    except Exception as ai_error:
+                        if "429" in str(ai_error) or "quota" in str(ai_error).lower():
+                            logger.warning(f"AI quota exceeded in DM, using keyword fallback for: {message_text[:50]}")
+                            # Simple keyword-based fallback when AI quota is exceeded
+                            detected_task = self._simple_task_detection_fallback(message_text, f"DM with {dm_partner_name}")
+                        else:
+                            logger.error(f"AI analysis error in DM: {ai_error}")
                     
                     # Only include tasks with good confidence for personal analysis
                     if detected_task and detected_task.confidence_score >= 0.7:  # Higher threshold for DMs
@@ -3165,37 +3102,7 @@ Canvas creates a beautiful visual todo list that you can share with your team. I
             logger.error(f"Error deduplicating tasks: {str(e)}")
             return all_tasks  # Return original list if deduplication fails
 
-    def _create_personal_canvas(self, dm_channel_id: str, user_id: str, tasks: List[Dict]) -> Tuple[bool, str]:
-        """
-        Create a personal Canvas in the user's DM with the bot
-        
-        Args:
-            dm_channel_id: DM channel ID
-            user_id: User ID
-            tasks: List of task dictionaries
-            
-        Returns:
-            Tuple of (success, message)
-        """
-        try:
-            # Generate personal canvas content
-            canvas_content = self._generate_personal_canvas_content(user_id, tasks)
-            
-            # Create personal canvas in DM
-            success, message, canvas = self.canvas_manager.create_canvas(
-                channel_id=dm_channel_id,
-                title="Personal Master Todo List",
-                created_by=user_id
-            )
-            
-            if success:
-                return True, f"Personal Canvas created: {message}"
-            else:
-                return False, f"Failed to create personal Canvas: {message}"
-            
-        except Exception as e:
-            logger.error(f"Error creating personal canvas: {str(e)}")
-            return False, f"Error creating personal canvas: {str(e)}"
+
 
     def _generate_personal_canvas_content(self, user_id: str, tasks: List[Dict]) -> str:
         """
@@ -3382,6 +3289,372 @@ Canvas creates a beautiful visual todo list that you can share with your team. I
             logger.error(f"Error saving personal todos: {str(e)}")
             return 0
 
+    def _simple_task_detection_fallback(self, message_text: str, channel_name: str):
+        """
+        Simple keyword-based task detection fallback when AI quota is exceeded
+        
+        Args:
+            message_text: Message text to analyze
+            channel_name: Channel name for context
+            
+        Returns:
+            Simple detected task object or None
+        """
+        try:
+            message_lower = message_text.lower().strip()
+            
+            # Task keywords that indicate actionable content (expanded)
+            task_keywords = [
+                'need to', 'have to', 'must', 'should', 'todo', 'task',
+                'deadline', 'due', 'urgent', 'asap', 'please', 'can you',
+                'fix', 'update', 'create', 'review', 'check', 'send',
+                'call', 'email', 'meeting', 'schedule', 'prepare',
+                'we need', 'i need', 'let\'s', 'remember to', 'don\'t forget',
+                'action item', 'follow up', 'next step', 'work on',
+                'finish', 'complete', 'implement', 'handle', 'take care',
+                'make sure', 'ensure', 'organize', 'plan', 'discuss'
+            ]
+            
+            # Priority keywords
+            priority_keywords = {
+                'critical': ['urgent', 'asap', 'critical', 'emergency', 'immediately'],
+                'high': ['important', 'priority', 'soon', 'deadline'],
+                'medium': ['should', 'need to', 'please'],
+                'low': ['when you can', 'sometime', 'eventually']
+            }
+            
+            # Task type keywords
+            type_keywords = {
+                'bug': ['bug', 'error', 'broken', 'fix', 'issue'],
+                'feature': ['feature', 'add', 'create', 'build', 'implement'],
+                'meeting': ['meeting', 'call', 'discuss', 'sync'],
+                'review': ['review', 'check', 'approve', 'feedback'],
+                'deadline': ['deadline', 'due', 'by'],
+                'urgent': ['urgent', 'asap', 'emergency']
+            }
+            
+            # Check if message contains task indicators
+            has_task_keywords = any(keyword in message_lower for keyword in task_keywords)
+            
+            if not has_task_keywords:
+                return None
+            
+            # Determine priority
+            priority = 'medium'  # default
+            for prio, keywords in priority_keywords.items():
+                if any(keyword in message_lower for keyword in keywords):
+                    priority = prio
+                    break
+            
+            # Determine task type
+            task_type = 'general'  # default
+            for t_type, keywords in type_keywords.items():
+                if any(keyword in message_lower for keyword in keywords):
+                    task_type = t_type
+                    break
+            
+            # Generate a simple title (first 60 characters, cleaned up)
+            title = message_text.strip()
+            if len(title) > 60:
+                title = title[:60] + "..."
+            
+            # Clean up title - remove excessive punctuation
+            title = ' '.join(title.split())  # normalize whitespace
+            
+            # Create a simple task object (mimic the DetectedTask structure)
+            class SimpleFallbackTask:
+                def __init__(self, title, task_type, priority):
+                    self.title = title
+                    self.task_type = task_type
+                    self.priority = priority
+                    self.due_date = None  # Could add simple date parsing if needed
+                    self.confidence_score = 0.65  # Lower confidence for better sensitivity
+            
+            logger.info(f"Keyword fallback detected task: {title} (type: {task_type}, priority: {priority})")
+            return SimpleFallbackTask(title, task_type, priority)
+            
+        except Exception as e:
+            logger.error(f"Error in simple task detection fallback: {str(e)}")
+            return None
+    
+    def _safe_api_call(self, api_method, **kwargs):
+        """
+        Wrapper for Slack API calls with rate limiting and retry logic
+        
+        Args:
+            api_method: Slack API method to call
+            **kwargs: Arguments for the API method
+            
+        Returns:
+            API response or error response
+        """
+        import time
+        
+        max_retries = 3
+        base_delay = 1
+        
+        for attempt in range(max_retries):
+            try:
+                response = api_method(**kwargs)
+                return response
+            
+            except SlackApiError as e:
+                if e.response.get('error') == 'ratelimited':
+                    # Handle rate limiting with exponential backoff
+                    retry_after = e.response.headers.get('retry-after', base_delay * (2 ** attempt))
+                    wait_time = min(int(retry_after), 60)  # Cap at 60 seconds
+                    
+                    logger.warning(f"Rate limited, waiting {wait_time} seconds (attempt {attempt + 1}/{max_retries})")
+                    
+                    if attempt < max_retries - 1:  # Don't wait on last attempt
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logger.error(f"Max retries exceeded for rate limited API call")
+                        return {'ok': False, 'error': 'ratelimited', 'max_retries_exceeded': True}
+                else:
+                    # Re-raise non-rate-limit errors
+                    raise e
+                    
+            except Exception as e:
+                logger.error(f"API call error: {str(e)}")
+                return {'ok': False, 'error': str(e)}
+        
+        return {'ok': False, 'error': 'max_retries_exceeded'}
+
+    def _handle_task_checkbox_interaction(self, payload: Dict) -> Dict:
+        """
+        Handle interactive checkbox clicks from the personal task list
+        
+        Args:
+            payload: Slack interaction payload
+            
+        Returns:
+            Response dictionary for Slack
+        """
+        try:
+            user_id = payload.get('user', {}).get('id')
+            action = payload.get('actions', [{}])[0]
+            action_id = action.get('action_id', '')
+            selected_options = action.get('selected_options', [])
+            
+            logger.info(f"Checkbox interaction: user={user_id}, action_id={action_id}, selected={len(selected_options)}")
+            
+            if action_id.startswith('task_toggle_'):
+                # Extract task info from action_id
+                parts = action_id.split('_')
+                if len(parts) >= 4:
+                    priority = parts[2]
+                    task_index = parts[3]
+                    
+                    if selected_options:
+                        # Task was checked
+                        response_text = f"✅ Task marked complete! Great job! 🎉"
+                        
+                        # Optionally update the database todo status here
+                        # self._mark_personal_todo_complete(user_id, action_id)
+                    else:
+                        # Task was unchecked
+                        response_text = f"↩️ Task unmarked. No worries, keep going!"
+                    
+                    # Send ephemeral response
+                    return {
+                        "response_type": "ephemeral",
+                        "text": response_text
+                    }
+            
+            return {"response_type": "ephemeral", "text": "👍 Got it!"}
+            
+        except Exception as e:
+            logger.error(f"Error handling checkbox interaction: {str(e)}")
+            return {
+                "response_type": "ephemeral", 
+                "text": "❌ Error processing your selection"
+            }
+
+    def _create_personal_list(self, dm_channel_id: str, user_id: str, tasks: List[Dict]) -> Tuple[bool, str]:
+        """
+        Create or update a personal Slack List in the user's DM with the bot
+        
+        Args:
+            dm_channel_id: DM channel ID
+            user_id: User ID
+            tasks: List of task dictionaries
+            
+        Returns:
+            Tuple of (success, message)
+        """
+        try:
+            logger.info(f"Creating personal Slack List for user {user_id} with {len(tasks)} tasks")
+            
+            # Create a Slack List using the Files API
+            # (Note: Slack Lists are created through files.upload with a specific format)
+            
+            # Prepare list content in the format Slack expects
+            list_title = "Personal Task List"
+            list_items = []
+            
+            # Group tasks by priority  
+            priority_groups = {
+                'critical': [],
+                'high': [],
+                'medium': [],
+                'low': []
+            }
+            
+            for task in tasks:
+                priority = task.get('priority', 'medium')
+                priority_groups[priority].append(task)
+            
+            # Create list items with proper formatting
+            for priority in ['critical', 'high', 'medium', 'low']:
+                if priority_groups[priority]:
+                    priority_emoji = {
+                        'critical': '🔴',
+                        'high': '🟠', 
+                        'medium': '🟡',
+                        'low': '🟢'
+                    }
+                    
+                    for task in priority_groups[priority]:
+                        title = task.get('title', 'Untitled task')
+                        source = task.get('source_name', 'Unknown source')
+                        task_type = task.get('task_type', 'general')
+                        
+                        # Format task title with priority and source info
+                        item_title = f"{priority_emoji[priority]} {title}"
+                        item_description = f"From: {source}"
+                        
+                        if task_type != 'general':
+                            type_emoji = {
+                                'bug': '🐛', 'feature': '✨', 'meeting': '📅',
+                                'review': '👀', 'urgent': '🚨', 'deadline': '⏰'
+                            }
+                            item_description += f" | {type_emoji.get(task_type, '📝')} {task_type}"
+                        
+                        list_items.append({
+                            "text": item_title,
+                            "description": item_description,
+                            "completed": False,
+                            "priority": priority
+                        })
+            
+            # Try using the message approach with rich text blocks that look like a list
+            blocks = [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"🎯 {list_title}"
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"📊 *{len(tasks)} actionable tasks found across your workspace*\n_Click items to mark complete_"
+                    }
+                }
+            ]
+            
+            # Add a section for each priority group
+            for priority in ['critical', 'high', 'medium', 'low']:
+                if priority_groups[priority]:
+                    priority_emoji = {
+                        'critical': '🔴',
+                        'high': '🟠', 
+                        'medium': '🟡',
+                        'low': '🟢'
+                    }
+                    
+                    # Priority header
+                    blocks.append({
+                        "type": "divider"
+                    })
+                    blocks.append({
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*{priority_emoji[priority]} {priority.upper()} PRIORITY*"
+                        }
+                    })
+                    
+                    # Create action blocks with checkboxes for each task
+                    task_elements = []
+                    for i, task in enumerate(priority_groups[priority]):
+                        title = task.get('title', 'Untitled task')
+                        source = task.get('source_name', 'Unknown source')
+                        task_type = task.get('task_type', 'general')
+                        
+                        # Create unique action_id for this task
+                        action_id = f"task_toggle_{priority}_{i}"
+                        
+                        # Format the checkbox text
+                        checkbox_text = f"{title}\n📍 {source}"
+                        if task_type != 'general':
+                            type_emoji = {
+                                'bug': '🐛', 'feature': '✨', 'meeting': '📅',
+                                'review': '👀', 'urgent': '🚨', 'deadline': '⏰'
+                            }
+                            checkbox_text += f" | {type_emoji.get(task_type, '📝')} {task_type}"
+                        
+                        task_elements.append({
+                            "type": "checkboxes",
+                            "options": [
+                                {
+                                    "text": {
+                                        "type": "mrkdwn",
+                                        "text": checkbox_text
+                                    },
+                                    "value": action_id
+                                }
+                            ],
+                            "action_id": action_id
+                        })
+                    
+                    # Add elements in groups of 3 (Slack limit for elements per action block)
+                    for i in range(0, len(task_elements), 3):
+                        element_group = task_elements[i:i+3]
+                        for element in element_group:
+                            blocks.append({
+                                "type": "actions",
+                                "elements": [element]
+                            })
+            
+            # Add footer
+            blocks.append({
+                "type": "divider"
+            })
+            blocks.append({
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "💡 Use `/todo list` for database view | `/task` to refresh | `/todo complete [id]` for specific todos"
+                    }
+                ]
+            })
+            
+            # Send the interactive task list message
+            response = self.client.chat_postMessage(
+                channel=dm_channel_id,
+                text=f"🎯 Personal Task List ({len(tasks)} tasks)",
+                blocks=blocks
+            )
+            
+            if response['ok']:
+                logger.info(f"Successfully created personal task list for user {user_id}")
+                return True, "Interactive task list created in your DM! Click checkboxes to mark tasks complete."
+            else:
+                logger.error(f"Failed to create personal task list: {response.get('error', 'unknown error')}")
+                return False, f"Failed to create task list: {response.get('error', 'unknown error')}"
+            
+        except Exception as e:
+            logger.error(f"Error creating personal task list: {str(e)}")
+            return False, f"Error creating task list: {str(e)}"
+
+
+ 
 
 # Utility function for command handlers
 def verify_slack_signature(request_body: str, timestamp: str, signature: str) -> bool:
