@@ -118,6 +118,10 @@ def handle_interactive_component(request):
                         return JsonResponse({"text": "Action processed successfully"})
                     else:
                         return JsonResponse({"text": "Failed to process action"}, status=500)
+                elif action_id.startswith('task_toggle_'):
+                    # Handle personal task list checkbox interactions
+                    response = bot_handler._handle_task_checkbox_interaction(payload)
+                    return JsonResponse(response)
         
         # Default response for unhandled interactive components
         return JsonResponse({"text": "Component processed"})
