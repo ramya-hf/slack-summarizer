@@ -15,7 +15,7 @@ from django.db.models import Q, Count
 
 from .models import (
     ChannelTodo, SlackChannel, SlackWorkspace, TaskSummary, 
-    TaskReminder, ChannelCanvas
+    TaskReminder
 )
 from .task_detector import TaskDetector, DetectedTask
 
